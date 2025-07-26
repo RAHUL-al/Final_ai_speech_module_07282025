@@ -1,3 +1,4 @@
+from fastapi.websockets import WebSocketState
 import asyncio
 from langchain_core.prompts import PromptTemplate
 from langchain_ollama import ChatOllama
@@ -76,7 +77,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from pydub import AudioSegment
 import aiohttp
 CPU_API_BASE = "http://13.200.201.10:8000"
-
+model_name = OllamaLLM(model="mistral")
 scraping_api_key = os.getenv("SCRAPINGDOG_API_KEY")
 
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
@@ -287,10 +288,6 @@ async def audio_ws(websocket: WebSocket):
                     # Speech-to-text
                     transcribed_text = await topic.speech_to_text(chunk_filename, username)
 
-                    # Fluency
-                    #result = await topic.speech_to_text(audio_file, username)
-                    #transcribed_text = result['text']  # Exactly equivalent to old behavior
-                    #confidence = result['confidence']
                     async with session.post(
                         f"{CPU_API_BASE}/fluency-score",
                         json={"text": transcribed_text}
@@ -398,9 +395,34 @@ def get_tts_audio(username: str):
 
 
 
+
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks
+import os
+import shutil
+import time
+import logging
+import asyncio
+import uuid
+from typing import List, Dict
+from PIL import Image, ImageDraw, ImageFont
+from pdf2image import convert_from_path
+import docx2txt
+from pptx import Presentation
+import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import google.generativeai as genai
+import torch
+
+SUPPORTED_IMAGE_FORMATS = [".png", ".jpg", ".jpeg"]
+SUPPORTED_TEXT_FORMATS = [".txt"]
+SUPPORTED_PDF_FORMATS = [".pdf"]
+SUPPORTED_DOC_FORMATS = [".docx"]
+SUPPORTED_PPT_FORMATS = [".pptx"]
+SUPPORTED_XLS_FORMATS = [".xlsx"]
+
+
 genai.configure(api_key=GOOGLE_API_KEY)
 gemini_model = genai.GenerativeModel("gemini-1.5-pro")
-
 pc = Pinecone(api_key=PINECONE_API_KEY)
 
 if PINECONE_INDEX_NAME not in pc.list_indexes().names():
@@ -420,19 +442,15 @@ embedding_model = HuggingFaceEmbeddings(
     model_kwargs={'device': 'cuda' if torch.cuda.is_available() else 'cpu'}
 )
 
+executor = ThreadPoolExecutor(max_workers=8)
 
-
-
-
-SUPPORTED_IMAGE_FORMATS = [".png", ".jpg", ".jpeg"]
-SUPPORTED_TEXT_FORMATS = [".txt"]
-SUPPORTED_PDF_FORMATS = [".pdf"]
-SUPPORTED_DOC_FORMATS = [".docx"]
-SUPPORTED_PPT_FORMATS = [".pptx"]
-SUPPORTED_XLS_FORMATS = [".xlsx"]
+async def run_in_threadpool(func, *args, **kwargs):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, lambda: func(*args, **kwargs))
 
 
 def render_text_to_image(text: str, width=800, font_size=18) -> Image.Image:
+    """Render text content to an image with proper formatting"""
     font = ImageFont.load_default()
     lines = []
     dummy_img = Image.new("RGB", (width, 1000))
@@ -460,13 +478,18 @@ def render_text_to_image(text: str, width=800, font_size=18) -> Image.Image:
         y += font_size
     return img
 
-
 def file_to_images(file_path: str) -> List[Image.Image]:
+    """Convert various file formats to a list of images (pages)"""
     ext = os.path.splitext(file_path)[1].lower()
     images = []
 
     if ext in SUPPORTED_PDF_FORMATS:
-        images = convert_from_path(file_path, dpi=200)
+        # Use multiple threads for PDF conversion
+        with ThreadPoolExecutor() as pdf_executor:
+            futures = []
+            # Split PDF conversion into chunks
+            chunk_size = 10  # Number of pages per chunk
+            images = convert_from_path(file_path, dpi=200, thread_count=4)
 
     elif ext in SUPPORTED_IMAGE_FORMATS:
         images = [Image.open(file_path)]
@@ -507,194 +530,271 @@ def file_to_images(file_path: str) -> List[Image.Image]:
 
     return images
 
-
-def extract_text_from_any_file(file_path: str) -> str:
-    images = file_to_images(file_path)
-    all_text = ""
-
-    for idx, image in enumerate(images):
-        try:
-            response = gemini_model.generate_content([
+async def process_single_image(image: Image.Image, idx: int) -> str:
+    """Process a single image/page with Gemini OCR"""
+    try:
+        response = await run_in_threadpool(
+            gemini_model.generate_content,
+            [
                 "Extract all the text from this image accurately, including tables and special formatting.",
                 image
-            ])
-            text = response.text.strip()
-            print(text)
-            all_text += f"\n\n--- Page/Image {idx + 1} ---\n{text}"
-        except Exception as e:
-            logging.error(f"OCR failed on image {idx + 1}: {e}")
-            all_text += f"\n\n--- Page/Image {idx + 1} FAILED ---"
+            ]
+        )
+        text = response.text.strip()
+        return f"\n\n--- Page/Image {idx + 1} ---\n{text}"
+    except Exception as e:
+        logging.error(f"OCR failed on image {idx + 1}: {e}")
+        return f"\n\n--- Page/Image {idx + 1} FAILED ---"
 
+async def extract_text_parallel(file_path: str, timeout_per_page: int = 60) -> str:
+    """Parallel text extraction from all pages/images"""
+    images = await run_in_threadpool(file_to_images, file_path)
+    if not images:
+        return ""
+    
+    all_text = ""
+    tasks = []
+    
+    # Create tasks for all images
+    for idx, image in enumerate(images):
+        task = asyncio.create_task(
+            asyncio.wait_for(
+                process_single_image(image, idx),
+                timeout=timeout_per_page
+            )
+        )
+        tasks.append(task)
+    
+    # Process results as they complete
+    for i, task in enumerate(asyncio.as_completed(tasks)):
+        try:
+            page_text = await task
+            all_text += page_text
+        except asyncio.TimeoutError:
+            logging.warning(f"Timeout processing page {i + 1}")
+            all_text += f"\n\n--- Page/Image {i + 1} TIMEOUT ---"
+        except Exception as e:
+            logging.error(f"Error processing page {i + 1}: {e}")
+            all_text += f"\n\n--- Page/Image {i + 1} ERROR ---"
+    
     return all_text
+
+async def extract_text_with_retry(file_path: str, timeout=240, max_retries=3) -> tuple[str, bool]:
+    """Enhanced OCR extraction with timeout tracking and parallel processing"""
+    last_error = None
+    timeout_occurred = False
+    
+    for attempt in range(1, max_retries + 2):
+        try:
+            task_start = time.time()
+            
+            # Use parallel extraction
+            task = asyncio.create_task(extract_text_parallel(file_path))
+            
+            try:
+                result = await asyncio.wait_for(task, timeout=timeout)
+                elapsed = time.time() - task_start
+                logging.info(f"OCR succeeded in attempt {attempt} ({elapsed:.2f}s)")
+                return result, timeout_occurred
+                
+            except asyncio.TimeoutError:
+                task.cancel()
+                elapsed = time.time() - task_start
+                logging.warning(
+                    f"OCR timeout in attempt {attempt} after {elapsed:.2f}s "
+                    f"(Timeout setting: {timeout}s)"
+                )
+                last_error = f"Timeout after {timeout}s"
+                timeout_occurred = True
+                
+                if attempt <= max_retries:
+                    backoff = min(2 ** attempt, 10)
+                    await asyncio.sleep(backoff)
+                    
+        except Exception as e:
+            last_error = str(e)
+            logging.error(f"OCR attempt {attempt} failed: {last_error}")
+            if attempt <= max_retries:
+                await asyncio.sleep(1)
+
+    raise HTTPException(
+        status_code=504,
+        detail=f"OCR failed after {max_retries + 1} attempts. Last error: {last_error}"
+    )
 
 
 
 @app.post("/upload/")
 async def upload_file(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     student_class: str = Form(...),
     subject: str = Form(...),
     curriculum: str = Form(...)
 ):
+    """Handle large file upload with parallel text extraction and vector storage"""
+    file_path = None
     try:
-        # ===== 1. File Storage Setup =====
+        # 1. File Storage Setup
+        start_time = time.time()
         folder = f"uploads/{curriculum}/{student_class}/{subject}"
         os.makedirs(folder, exist_ok=True)
         file_path = os.path.join(folder, file.filename)
 
-        # Save file temporarily
+        # Stream file to disk
         with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+            while chunk := await file.read(1024 * 1024):
+                buffer.write(chunk)
+        logging.info(f"File saved in {time.time()-start_time:.2f}s")
 
-        # ===== 2. Text Extraction =====
-        extracted_text = extract_text_from_any_file(file_path)
-        if not extracted_text.strip():
-            raise HTTPException(status_code=422, detail="No text extracted.")
+        # 2. Parallel Text Extraction
+        extract_start = time.time()
+        try:
+            extracted_text, timeout_occurred = await extract_text_with_retry(
+                file_path,
+                timeout=240,
+                max_retries=2
+            )
+            logging.info(f"Text extracted in {time.time()-extract_start:.2f}s")
+            
+            if not extracted_text.strip():
+                raise HTTPException(
+                    status_code=422,
+                    detail="No text could be extracted from the file"
+                )
+                
+        except HTTPException as e:
+            raise e
+        except Exception as e:
+            logging.error(f"OCR processing failed: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to process document content"
+            )
 
-        # ===== 3. Check for Existing File (Deduplication) =====
+        # 3. Prepare for vector storage
         namespace = f"{curriculum}_{student_class}_{subject}"
+        
+        # Check for existing file to prevent duplicates
         existing_entries = index.query(
             vector=embedding_model.embed_query(extracted_text[:1000]),
             top_k=1,
             filter={
                 "filename": {"$eq": file.filename},
-                "type": {"$eq": "ocr_file"}
+                "type": {"$eq": "document"}
             },
             namespace=namespace
         )
-
+        
         if existing_entries.matches:
-            logging.warning(f"File {file.filename} already exists in DB")
             return {
-                "status": "skipped",
-                "message": "File already exists in database",
+                "status": "duplicate",
+                "message": "File already exists in vector database",
                 "existing_id": existing_entries.matches[0].id
             }
 
-        # ===== 4. Chunking and Metadata Preparation =====
+        # 4. Chunking and embedding
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200,
             length_function=len
         )
         chunks = text_splitter.split_text(extracted_text)
-
+        
+        # Prepare metadata for each chunk
         metadatas = [{
             "curriculum": curriculum,
             "student_class": student_class,
             "subject": subject,
             "filename": file.filename,
-            "type": "ocr_file",
-            "chunk_id": f"{i}_{uuid.uuid4()}",
-            "text": chunk
+            "type": "document",
+            "chunk_idx": i,
+            "text": chunk[:500]  # Store first 500 chars for reference
         } for i, chunk in enumerate(chunks)]
 
-        # ===== 5. Vector Storage with Error Handling =====
-        try:
-            # Initialize vector store with namespace
-            vectorstore = PineconeVectorStore.from_existing_index(
-                index_name=PINECONE_INDEX_NAME,
-                embedding=embedding_model,
-                text_key="text",
-                namespace=namespace
-            )
+        # 5. Store in vector database (in background)
+        background_tasks.add_task(
+            store_in_vector_db,
+            chunks=chunks,
+            metadatas=metadatas,
+            namespace=namespace
+        )
 
-            # Generate embeddings and upsert
-            embeddings = embedding_model.embed_documents(chunks)
-            records = zip(
-                [md["chunk_id"] for md in metadatas],
-                embeddings,
-                metadatas
-            )
-            
-            # Batch upsert to handle large documents
-            batch_size = 100  # Pinecone recommends batches of 100-1000 vectors
-            for i in range(0, len(chunks), batch_size):
-                batch = list(records)[i:i + batch_size]
-                vectorstore._index.upsert(vectors=batch)
-
-            # Verify insertion
-            stats = index.describe_index_stats()
-            new_count = stats["namespaces"].get(namespace, {}).get("vector_count", 0)
-
-        except Exception as e:
-            logging.error(f"Pinecone operation failed: {str(e)}", exc_info=True)
-            raise HTTPException(
-                status_code=503,
-                detail="Database operation failed. Please retry."
-            )
-
-        # ===== 6. Response =====
         return {
             "status": "success",
-            "vectors_inserted": new_count,
             "filename": file.filename,
-            "namespace": namespace,
-            "sample_text": extracted_text[:200] + "..."
+            "message": "File processed and queued for vector storage",
+            "processing_times": {
+                "file_save": f"{time.time()-start_time:.2f}s",
+                "text_extraction": f"{time.time()-extract_start:.2f}s"
+            },
+            "timeout_occurred": timeout_occurred,
+            "chunk_count": len(chunks),
+            "namespace": namespace
         }
 
     except HTTPException as e:
         raise e
-
     except Exception as e:
         logging.error(f"Upload failed: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail="Internal server error during file processing"
         )
-
     finally:
-        # Clean up temporary file
-        if os.path.exists(file_path):
+        if file_path and os.path.exists(file_path):
             try:
                 os.remove(file_path)
+                logging.info("Temporary file cleaned up")
             except Exception as e:
                 logging.warning(f"Failed to delete temp file: {str(e)}")
 
+def store_in_vector_db(chunks: List[str], metadatas: List[Dict], namespace: str):
+    """Store document chunks in vector database (runs in background)"""
+    try:
+        logging.info(f"Starting vector storage for {len(chunks)} chunks in namespace {namespace}")
+        
+        # Initialize vector store
+        vectorstore = PineconeVectorStore.from_existing_index(
+            index_name=PINECONE_INDEX_NAME,
+            embedding=embedding_model,
+            text_key="text",
+            namespace=namespace
+        )
+        
+        # Generate embeddings and store in batches
+        batch_size = 50  # Pinecone recommends batches of 50-100 vectors
+        for i in range(0, len(chunks), batch_size):
+            batch_chunks = chunks[i:i + batch_size]
+            batch_metadatas = metadatas[i:i + batch_size]
+            
+            try:
+                # Generate embeddings
+                embeddings = embedding_model.embed_documents(batch_chunks)
+                
+                # Prepare records for upsert
+                records = []
+                for j, (chunk, metadata) in enumerate(zip(batch_chunks, batch_metadatas)):
+                    record = {
+                        "id": f"{namespace}_{i+j}_{uuid.uuid4().hex[:8]}",
+                        "values": embeddings[j],
+                        "metadata": metadata
+                    }
+                    records.append(record)
+                
+                # Upsert to Pinecone
+                vectorstore._index.upsert(vectors=records, namespace=namespace)
+                logging.info(f"Upserted batch {i//batch_size + 1} with {len(records)} vectors")
+                
+            except Exception as e:
+                logging.error(f"Failed to process batch {i//batch_size + 1}: {str(e)}")
+                continue
+        
+        logging.info(f"Completed vector storage for namespace {namespace}")
+        
+    except Exception as e:
+        logging.error(f"Vector storage failed: {str(e)}", exc_info=True)
 
-def store_in_background(chunks, namespace, filename, curriculum, student_class, subject):
-    """Handle storage in background thread"""
-    def _store():
-        try:
-            vectorstore = PineconeVectorStore.from_existing_index(
-                index_name=PINECONE_INDEX_NAME,
-                embedding=embedding_model,
-                text_key="text",
-                namespace=namespace
-            )
-
-            embeddings = embedding_model.embed_documents(chunks)
-            metadatas = [{
-                "curriculum": curriculum,
-                "student_class": student_class,
-                "subject": subject,
-                "filename": filename,
-                "type": "ocr_file",
-                "chunk_id": f"{i}_{uuid.uuid4()}",
-                "text": chunk
-            } for i, chunk in enumerate(chunks)]
-
-            # Process in small batches
-            batch_size = 50
-            for i in range(0, len(chunks), batch_size):
-                batch = list(zip(
-                    [md["chunk_id"] for md in metadatas[i:i+batch_size]],
-                    embeddings[i:i+batch_size],
-                    metadatas[i:i+batch_size]
-                ))
-                try:
-                    vectorstore._index.upsert(vectors=batch)
-                except Exception as e:
-                    logging.error(f"Batch upsert failed: {str(e)}")
-
-        except Exception as e:
-            logging.error(f"Background storage failed: {str(e)}")
-
-    # Start in background without waiting
-    executor.submit(_store)
-
-
-model_name = OllamaLLM(model="mistral")
 
 
 async def store_vectors_async(chunks, metadatas, namespace):
@@ -739,6 +839,8 @@ async def store_vectors_async(chunks, metadatas, namespace):
                 
     except Exception as e:
         logging.error(f"Vector storage failed: {str(e)}", exc_info=True)
+
+
 
 @app.post("/chat/")
 async def chat(request: ChatRequest):
@@ -853,7 +955,51 @@ async def system_message(topic, mood, student_class, level) -> SystemMessage:
 
 
 
-EMP_DIR = os.path.abspath("temp_chunks")
+
+
+async def initialize_essay_document(username, student_topic, student_class, mood, accent, chat_history):
+    """Initialize a new essay document in Firestore"""
+    try:
+        # Convert initial chat history to serializable format
+        serializable_chat_history = []
+        for message in chat_history:
+            if isinstance(message, (AIMessage, SystemMessage, HumanMessage)):
+                message_dict = {
+                    'type': 'chat_message',
+                    'content': message.content,
+                    'message_type': 'system' if isinstance(message, SystemMessage) else 
+                                   'ai' if isinstance(message, AIMessage) else 
+                                   'human'
+                }
+                serializable_chat_history.append(message_dict)
+            else:
+                serializable_chat_history.append(str(message))
+
+        essay_data = {
+            "username": username,
+            "topic": student_topic,
+            "student_class": student_class,
+            "mood": mood,
+            "accent": accent,
+            "chat_history": serializable_chat_history,
+            "created_at": datetime.now(),
+            "status": "in_progress",
+            "chunks": [],
+            "average_scores": {}
+        }
+
+        # For async Firestore client:
+        _, doc_ref = db.collection("essays").add(essay_data)
+        return doc_ref.id
+        
+    except Exception as e:
+        logging.error(f"Failed to initialize essay document: {str(e)}", exc_info=True)
+        raise
+
+
+
+
+TEMP_DIR = os.path.abspath("temp_chunks")
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 @app.websocket("/ws/assistant")
@@ -867,9 +1013,26 @@ async def audio_ws(websocket: WebSocket):
     mood = query_params.get("mood", [None])[0]
     accent = query_params.get("accent", [None])[0]
 
+    chat_history = []
+    essay_id = await initialize_essay_document(
+        username=username,
+        student_topic=student_topic,
+        student_class=student_class,
+        mood=mood,
+        accent=accent,
+        chat_history=chat_history
+    )
+
+    logging.info(f"essay_id : {essay_id}")
+    
+    # Send essay_id immediately
+    try:
+        await websocket.send_json({"action": "essay_initialized", "essay_id": essay_id})
+    except Exception as e:
+        logging.error(f"Failed to send initial essay_id: {str(e)}")
+
     ai_response = await system_message(student_topic, mood, student_class, accent)
 
-    chat_history = []
     chat_history.append(SystemMessage(content=ai_response))
 
     
@@ -961,15 +1124,15 @@ async def audio_ws(websocket: WebSocket):
                     
                     if session_state['silence_duration'] >= config['silence_threshold']:
 
-                        await process_buffered_audio(session_state, websocket, username, session_temp_dir, topic, config,student_topic,student_class,mood,accent,chat_history)
+                        await process_buffered_audio(final_output,transcript_path,session_state, websocket, username, session_temp_dir, topic, config,student_topic,student_class,mood,accent,chat_history)
 
     except WebSocketDisconnect:
         logging.warning(f"[WS] {username} disconnected unexpectedly")
     except Exception as e:
         logging.error(f"Unexpected error: {str(e)}", exc_info=True)
     finally:
-        essay_id = await finalize_session(session_state, username, session_temp_dir, topic)
-        return {"essay_id":essay_id}
+        essay_id = finalize_session(session_state, username, session_temp_dir, topic,essay_id,chat_history)
+
 
 
 
@@ -1000,13 +1163,15 @@ def cleanup_temp_files(session_temp_dir, chunk_results):
 
 
 
-async def process_buffered_audio(session_state, websocket, username, temp_dir, topic, config,student_topic,student_class,mood,accent,chat_history):
+
+async def process_buffered_audio(final_output,transcript_path,session_state, websocket, username, temp_dir, topic, config,student_topic,student_class,mood,accent,chat_history):
     if len(session_state['audio_buffer']) == 0:
         return
         
     session_state['processing_active'] = True
     try:
-        # Save buffered audio
+
+
         buffer_filename = os.path.join(temp_dir, f"buffered_{time.time()}.wav")
         session_state['audio_buffer'].export(buffer_filename, format="wav")
         
@@ -1037,18 +1202,46 @@ async def process_buffered_audio(session_state, websocket, username, temp_dir, t
             
             # Get speech analysis
             async with aiohttp.ClientSession() as session:
-                emotion = await detect_emotion(session, buffer_filename)
-                fluency = await get_fluency_score(session, transcribed_text)
-                pronunciation = await get_pronunciation_score(session, buffer_filename)
-                
-                # Process the utterance
+
+                with open(buffer_filename, "rb") as f:
+                        form = aiohttp.FormData()
+                        form.add_field("file", f, filename=os.path.basename(buffer_filename), content_type="audio/wav")
+                        async with session.post(f"{CPU_API_BASE}/detect-emotion", data=form) as res:
+                            emotion_data = await res.json()
+                            emotion = emotion_data.get("emotion")
+
+                async with session.post(
+                    f"{CPU_API_BASE}/fluency-score",
+                    json={"text": transcribed_text}
+                ) as res:
+                    fluency_data = await res.json()
+                    fluency = fluency_data.get("fluency")
+
+                # Pronunciation
+                with open(buffer_filename, "rb") as f:
+                    form = aiohttp.FormData()
+                    form.add_field("file", f, filename=os.path.basename(buffer_filename), content_type="audio/wav")
+                    async with session.post(f"{CPU_API_BASE}/pronunciation-score", data=form) as res:
+                        pron_data = await res.json()
+                        pronunciation = pron_data.get("pronunciation")
+
+                result = {
+                    "fluency": fluency,
+                    "pronunciation": pronunciation,
+                    "emotion": emotion
+                }
+
+                if None in result.values():
+                    logging.warning(f"Incomplete analysis results: {result}")
+
+                logging.info(f"result is --------------->{result}")
+
                 await process_user_utterance(
-                    transcribed_text, emotion, fluency, pronunciation,
+                    transcribed_text, result["emotion"], result["fluency"], result["pronunciation"],
                     session_state, buffer_filename, websocket, 
                     username, temp_dir, topic,student_topic,student_class,mood,accent,chat_history
                 )
-        
-        # Reset buffers
+
         session_state['audio_buffer'] = AudioSegment.empty()
         session_state['text_buffer'] = []
         session_state['silence_duration'] = 0.0
@@ -1059,44 +1252,8 @@ async def process_buffered_audio(session_state, websocket, username, temp_dir, t
     finally:
         session_state['processing_active'] = False
 
-async def detect_emotion(session, audio_file):
-    """Send audio file to emotion detection API"""
-    try:
-        form = aiohttp.FormData()
-        form.add_field('file', 
-                      open(audio_file, 'rb'),
-                      filename=os.path.basename(audio_file),
-                      content_type='audio/wav')
-        
-        async with session.post(f"{CPU_API_BASE}/detect-emotion", data=form) as response:
-            if response.status == 200:
-                data = await response.json()
-                return data.get('emotion')
-            else:
-                logging.error(f"Emotion detection failed: {response.status}")
-                return None
-    except Exception as e:
-        logging.error(f"Emotion detection error: {str(e)}")
-        return None
-    
 
-async def get_fluency_score(session, text):
-    """Send text to fluency scoring API"""
-    try:
-        async with session.post(
-            f"{CPU_API_BASE}/fluency-score",
-            json={"text": text}
-        ) as response:
-            if response.status == 200:
-                data = await response.json()
-                return data.get('fluency')
-            else:
-                logging.error(f"Fluency scoring failed: {response.status}")
-                return None
-    except Exception as e:
-        logging.error(f"Fluency scoring error: {str(e)}")
-        return None
-    
+
 
 
 async def scraping(topic: str) -> str:
@@ -1122,30 +1279,10 @@ async def scraping(topic: str) -> str:
 
 
 
-
-async def get_pronunciation_score(session, audio_file):
-    """Send audio file to pronunciation scoring API"""
-    try:
-        form = aiohttp.FormData()
-        form.add_field('file', 
-                      open(audio_file, 'rb'),
-                      filename=os.path.basename(audio_file),
-                      content_type='audio/wav')
-        
-        async with session.post(f"{CPU_API_BASE}/pronunciation-score", data=form) as response:
-            if response.status == 200:
-                data = await response.json()
-                return data.get('pronunciation')
-            else:
-                logging.error(f"Pronunciation scoring failed: {response.status}")
-                return None
-    except Exception as e:
-        logging.error(f"Pronunciation scoring error: {str(e)}")
-        return None
-
 async def process_user_utterance(text, emotion, fluency, pronunciation, 
                                session_state, chunk_filename, websocket, 
                                username, session_temp_dir, topic,student_topic,student_class,mood,accent,chat_history):
+    topic.update_realtime_stats(fluency, pronunciation, emotion)
     """Process a valid user utterance"""
     session_state['text_output'].append(text)
     session_state['chunk_results'].append({
@@ -1158,8 +1295,6 @@ async def process_user_utterance(text, emotion, fluency, pronunciation,
     })
     session_state['chunk_index'] += 1
 
-    scraping_data = await scraping(student_topic)
-
     try:
         
         prompt_template = PromptTemplate(template = """
@@ -1167,7 +1302,6 @@ async def process_user_utterance(text, emotion, fluency, pronunciation,
             1. Answer questions conversationally
             2. Never reveal internal project details
             3. Keep responses under 200 words
-            4. Used {scraping_data}, which is updated data related to the topic which help in better answer and talking
             5. if by chance question is much more specific topic is needed and you does not have correct answer then used the function await scraping(your_specific_topic), which help in give updated answer.
                                          
             Chat History:
@@ -1207,7 +1341,7 @@ async def process_user_utterance(text, emotion, fluency, pronunciation,
             Would you like me to explain how these systems generally work?
 
             Current response should be:
-            """,input_variables=["scraping_data","question","student_topic","student_class","mood","accent","chat_history"]
+            """,input_variables=["question","student_topic","student_class","mood","accent","chat_history"]
             )
         
         model = ChatOllama(
@@ -1215,12 +1349,13 @@ async def process_user_utterance(text, emotion, fluency, pronunciation,
                 model_kwargs={"temperature": 0.8}
             )
 
+        
+
         parser = StrOutputParser()
 
         chain = prompt_template | model | parser
 
         ai_response = await chain.ainvoke({
-            "scraping_data":scraping_data,
             "student_topic": student_topic,
             "mood": mood,
             "student_class": student_class,
@@ -1230,6 +1365,18 @@ async def process_user_utterance(text, emotion, fluency, pronunciation,
         })
         chat_history.append(AIMessage(content=ai_response))
         print("[AI Response]:", ai_response)
+
+        chunk_result = {
+                    "chunk_index": session_state['chunk_index'],
+                    "text": text,
+                    "emotion": emotion,
+                    "fluency": fluency,
+                    "pronunciation": pronunciation,
+                    "file_path": chunk_filename,
+                    "chat_history":chat_history,
+                }
+        
+        session_state["chunk_results"].append(chunk_result)
 
         response_audio = await topic.text_to_speech_assistant(ai_response, username, session_temp_dir)
         sleep_time = await send_audio_response(websocket, response_audio)
@@ -1241,17 +1388,38 @@ async def process_user_utterance(text, emotion, fluency, pronunciation,
         logging.error(f"QA Error: {str(e)}")
         await send_default_response(websocket, username, session_temp_dir, topic)
 
+
+
+
+
 async def send_audio_response(websocket, audio_file):
     """Send audio file through websocket"""
     try:
+        if not os.path.exists(audio_file):
+            logging.error(f"Audio file not found: {audio_file}")
+            return 0  # Return default sleep time
+            
         audio = AudioSegment.from_wav(audio_file)
         duration_ms = len(audio)
+        
+        # Check if websocket is still connected
+        if websocket.client_state == WebSocketState.DISCONNECTED:
+            logging.warning("WebSocket disconnected before sending audio")
+            return 0
+            
         with open(audio_file, "rb") as f:
             await websocket.send_bytes(f.read())
 
         return duration_ms / 1000
+        
     except Exception as e:
         logging.error(f"Failed to send audio response: {str(e)}")
+        return 0
+
+
+
+
+
 
 async def send_default_response(websocket, username, session_temp_dir, topic):
     """Send default error response"""
@@ -1271,38 +1439,66 @@ async def send_followup(websocket, username, session_temp_dir, topic):
     except Exception as e:
         logging.error(f"Failed to send follow-up: {str(e)}")
 
-async def finalize_session(session_state, username, session_temp_dir, topic):
-    """Cleanup and save session data"""
-    essay_id = None
+
+
+def finalize_session(session_state, username, session_temp_dir, topic, essay_id, chat_history):
+    """Update the existing essay document with final data"""
     try:
-        essays_ref = db.collection("essays").where("username", "==", username)
-        today = datetime.now().date()
-        latest_essay = None
+        # Convert LangChain message objects to simple dictionaries
+        serializable_chat_history = []
+        for message in chat_history:
+            if isinstance(message, (AIMessage, SystemMessage, HumanMessage)):
+                message_dict = {
+                    'type': 'chat_message',
+                    'content': message.content,
+                    'message_type': 'system' if isinstance(message, SystemMessage) else 
+                                   'ai' if isinstance(message, AIMessage) else 
+                                   'human'
+                }
+                serializable_chat_history.append(message_dict)
+            elif isinstance(message, dict):
+                # If it's already a dictionary, use as-is
+                serializable_chat_history.append(message)
+            else:
+                # Fallback for any other type
+                serializable_chat_history.append(str(message))
+
+        # Prepare chunk results without file paths (as they're temporary)
+        chunk_results_clean = []
+        for chunk in session_state['chunk_results']:
+            clean_chunk = {
+                'chunk_index': chunk.get('chunk_index'),
+                'text': chunk.get('text'),
+                'emotion': chunk.get('emotion'),
+                'fluency': chunk.get('fluency'),
+                'pronunciation': chunk.get('pronunciation'),
+                # Exclude file_path as it's temporary
+            }
+            chunk_results_clean.append(clean_chunk)
+
+        # Get Firestore document reference
+        essay_ref = db.collection("essays").document(essay_id)
         
-        docs = essays_ref.stream()
-        for doc in docs:
-            doc_date = doc.create_time.date() if hasattr(doc, 'create_time') else datetime.fromtimestamp(doc.create_time.seconds).date()
-            if doc_date == today:
-                if not latest_essay or doc.create_time > latest_essay.create_time:
-                    latest_essay = doc
+        # Prepare update data
+        update_data = {
+            "chat_history": serializable_chat_history,
+            "chunks": chunk_results_clean,
+            "average_scores": topic.get_average_realtime_scores(),
+            "updated_at": datetime.now(),
+            "status": "completed",
+            "transcript": " ".join(session_state['text_output']).strip()
+        }
 
-        if latest_essay:
-            essay_id = latest_essay.id
-            latest_essay.reference.update({
-                "chunks": session_state['chunk_results'],
-                "average_scores": topic.get_average_realtime_scores(),
-                "updated_at": datetime.now()
-            })
-            logging.info(f"Updated essay document {essay_id}")
-            
+        # Update document
+        essay_ref.update(update_data)
+        logging.info(f"Successfully updated essay document {essay_id}")
+        
     except Exception as e:
-        logging.error(f"Database update failed: {str(e)}")
-
-    for chunk in session_state['chunk_results']:
-        try:
-            if os.path.exists(chunk['file_path']):
-                os.remove(chunk['file_path'])
-        except Exception as e:
-            logging.warning(f"Failed to delete chunk file {chunk['file_path']}: {e}")
-
+        logging.error(f"Failed to finalize essay document: {str(e)}", exc_info=True)
+        raise  # Re-raise the exception after logging
+    
+    finally:
+        # Cleanup files regardless of whether database update succeeded
+        cleanup_temp_files(session_temp_dir, session_state['chunk_results'])
+    
     return essay_id

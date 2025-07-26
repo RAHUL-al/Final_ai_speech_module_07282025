@@ -206,99 +206,98 @@ class Topic:
     
 
     async def overall_scoring_by_id(self, essay_id: str):
-        # try:
-        essay_doc = db.collection("essays").document(essay_id).get()
-        if not essay_doc.exists:
-            return {"error": f"No essay found with id {essay_id}"}
+        try:
+            essay_doc = db.collection("essays").document(essay_id).get()
+            if not essay_doc.exists:
+                return {"error": f"No essay found with id {essay_id}"}
 
-        essay_data = essay_doc.to_dict()
-        return essay_data
-        #     original_text = essay_data.get("content", "")
-        #     username = essay_data.get("username")
-        #     if not username:
-        #         return {"error": "Username missing in essay data"}
+            essay_data = essay_doc.to_dict()
+            original_text = essay_data.get("content", "")
+            username = essay_data.get("username")
+            if not username:
+                return {"error": "Username missing in essay data"}
 
-        #     chunks = essay_data.get("chunks", [])
-        #     if not chunks:
-        #         return {"error": "No audio chunks available for this essay. Please ensure audio recording was completed."}
+            chunks = essay_data.get("chunks", [])
+            if not chunks:
+                return {"error": "No audio chunks available for this essay. Please ensure audio recording was completed."}
 
-        #     spoken_text = " ".join(chunk.get("text", "") for chunk in chunks)
+            spoken_text = " ".join(chunk.get("text", "") for chunk in chunks)
 
-        #     avg_scores = essay_data.get("average_scores", {})
-        #     pronunciation = avg_scores.get("pronunciation")
-        #     fluency = avg_scores.get("fluency")
-        #     emotion = avg_scores.get("emotion")
+            avg_scores = essay_data.get("average_scores", {})
+            pronunciation = avg_scores.get("pronunciation")
+            fluency = avg_scores.get("fluency")
+            emotion = avg_scores.get("emotion")
 
-        #     if pronunciation is None or fluency is None or not emotion:
-        #         fluency_scores = [float(c.get("fluency", 0)) for c in chunks if c.get("fluency") is not None]
-        #         pronunciation_scores = [float(c.get("pronunciation", 0)) for c in chunks if c.get("pronunciation") is not None]
-        #         emotion_counts = {}
-        #         for c in chunks:
-        #             em = c.get("emotion")
-        #             if em:
-        #                 emotion_counts[em] = emotion_counts.get(em, 0) + 1
+            if pronunciation is None or fluency is None or not emotion:
+                fluency_scores = [float(c.get("fluency", 0)) for c in chunks if c.get("fluency") is not None]
+                pronunciation_scores = [float(c.get("pronunciation", 0)) for c in chunks if c.get("pronunciation") is not None]
+                emotion_counts = {}
+                for c in chunks:
+                    em = c.get("emotion")
+                    if em:
+                        emotion_counts[em] = emotion_counts.get(em, 0) + 1
 
-        #         pronunciation = round(sum(pronunciation_scores) / len(pronunciation_scores), 2) if pronunciation_scores else "[ERROR]"
-        #         fluency = round(sum(fluency_scores) / len(fluency_scores), 2) if fluency_scores else "[ERROR]"
-        #         emotion = max(emotion_counts.items(), key=lambda x: x[1])[0] if emotion_counts else "[ERROR]"
+                pronunciation = round(sum(pronunciation_scores) / len(pronunciation_scores), 2) if pronunciation_scores else "[ERROR]"
+                fluency = round(sum(fluency_scores) / len(fluency_scores), 2) if fluency_scores else "[ERROR]"
+                emotion = max(emotion_counts.items(), key=lambda x: x[1])[0] if emotion_counts else "[ERROR]"
 
-        #     grammar = await self.grammar_checking(spoken_text)
+            grammar = await self.grammar_checking(spoken_text)
 
-        #     prompt = f"""
-        #         You are an AI English teacher evaluating a student's spoken response based on their performance. You will be provided with the student's spoken text and a reference essay.
+            prompt = f"""
+                You are an AI English teacher evaluating a student's spoken response based on their performance. You will be provided with the student's spoken text and a reference essay.
 
-        #         Here are the available scores (only use the ones that are valid and available, ignore or skip any missing or erroneous ones like '[ERROR]' or None):
-        #         - Pronunciation: {pronunciation}
-        #         - Grammar: {grammar}
-        #         - Fluency: {fluency}
-        #         - Emotion: {emotion}
+                Here are the available scores (only use the ones that are valid and available, ignore or skip any missing or erroneous ones like '[ERROR]' or None):
+                - Pronunciation: {pronunciation}
+                - Grammar: {grammar}
+                - Fluency: {fluency}
+                - Emotion: {emotion}
 
-        #         Reference Essay:
-        #         \"\"\"{original_text}\"\"\"
+                Reference Essay:
+                \"\"\"{original_text}\"\"\"
 
-        #         Spoken Text:
-        #         \"\"\"{spoken_text}\"\"\"
+                Spoken Text:
+                \"\"\"{spoken_text}\"\"\"
 
-        #         Based on the above, return an honest but encouraging evaluation in **JSON format** with the following keys:
-        #         - before giving final understanding, topic_grip and suggestions plese look on all the score of pronunciation, grammar, fluency, emotion. Here are you get the score is out of 10.
-        #         - "understanding": Describe how well the spoken text reflects understanding of the reference essay.
-        #         - "topic_grip": Comment on how well the speaker stayed on topic and conveyed key points.
-        #         - "suggestions": A list of 3 teacher-style suggestions to improve the student's speaking and comprehension.
-        #         - And also suggest some suggestion with example where is the problem in the speech text and what are you need to speak give 1-5 examples in suggestions.
+                Based on the above, return an honest but encouraging evaluation in **JSON format** with the following keys:
+                - before giving final understanding, topic_grip and suggestions plese look on all the score of pronunciation, grammar, fluency, emotion. Here are you get the score is out of 10.
+                - "understanding": Describe how well the spoken text reflects understanding of the reference essay.
+                - "topic_grip": Comment on how well the speaker stayed on topic and conveyed key points.
+                - "suggestions": A list of 3 teacher-style suggestions to improve the student's speaking and comprehension.
+                - And also suggest some suggestion with example where is the problem in the speech text and what are you need to speak give 1-5 examples in suggestions.
 
-        #         'blocklist': [
-        #             'you', 'thank you', 'tchau', 'thanks', 'ok', 'Obrigado.', 'E aí', '',
-        #             'me', 'hello', 'hi', 'hey', 'okay', 'thanks', 'thank', 'obrigado',
-        #             'tchau.', 'bye', 'goodbye', 'me.', 'you.', 'thank you.'
-        #         ],
+                'blocklist': [
+                    'you', 'thank you', 'tchau', 'thanks', 'ok', 'Obrigado.', 'E aí', '',
+                    'me', 'hello', 'hi', 'hey', 'okay', 'thanks', 'thank', 'obrigado',
+                    'tchau.', 'bye', 'goodbye', 'me.', 'you.', 'thank you.'
+                ],
 
-        #         Important:
-        #         - You got some data of list blocklist, then you need to concentrate on some word found from blocklist then try to understand it is worked as a raw sentence or make a little meaning because here this content is coming from database which is speak by user then used it else did not take word means filter that from existing content.
-        #         - Do not include invalid, missing, or placeholder values in the response.
-        #         - Do not talk about improving the AI itself; focus on guiding a human student.
-        #         - Keep the tone supportive and constructive, like a real teacher giving oral feedback.
-        #     """
+                Important:
+                - You got some data of list blocklist, then you need to concentrate on some word found from blocklist then try to understand it is worked as a raw sentence or make a little meaning because here this content is coming from database which is speak by user then used it else did not take word means filter that from existing content.
+                - Do not include invalid, missing, or placeholder values in the response.
+                - Do not talk about improving the AI itself; focus on guiding a human student.
+                - Keep the tone supportive and constructive, like a real teacher giving oral feedback.
+            """
 
-        #     summary_response = await self.topic_data_model_for_Qwen(username, prompt)
+            summary_response = await self.topic_data_model_for_Qwen(username, prompt)
 
-        #     try:
-        #         result = json.loads(str(summary_response))
-        #     except Exception as e:
-        #         logger.warning(f"Could not parse JSON: {e}")
-        #         result = {"raw_response": str(summary_response)}
+            try:
+                result = json.loads(str(summary_response))
+            except Exception as e:
+                logger.warning(f"Could not parse JSON: {e}")
+                result = {"raw_response": str(summary_response)}
 
-        #     result.update({
-        #         "pronunciation": pronunciation,
-        #         "grammar": grammar,
-        #         "fluency": fluency,
-        #         "emotion": emotion
-        #     })
+            result.update({
+                "pronunciation": pronunciation,
+                "grammar": grammar,
+                "fluency": fluency,
+                "emotion": emotion
+            })
 
-        #     return result
+            return result
 
-        # except Exception as e:
-        #     logger.exception(f"[ERROR] overall_scoring_by_id failed: {e}")
-        #     return {"error": "Internal Server Error"}
+        except Exception as e:
+            logger.exception(f"[ERROR] overall_scoring_by_id failed: {e}")
+            return {"error": "Internal Server Error"}
 
 	
     async def speech_to_text(self, audio_path: str, username: str, device=None) -> str:
@@ -314,7 +313,7 @@ class Topic:
             return ""
 
     def _speech_to_text(self, audio_path: str, device=None) -> str:
-        token = "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"
+        token = "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"
         API_URL = "https://api-inference.huggingface.co/models/openai/whisper-large-v3"
         headers = {
             "Authorization": f"Bearer {token}",
