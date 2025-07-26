@@ -1,0 +1,21 @@
+# Ignore common user-specific config and history files
+.bash_history
+.bash_logout
+.bashrc
+.cache/
+.config/
+.git-credentials
+.gitconfig
+.lesshst
+.local/
+.mysql_history
+.npm/
+.nv/
+.ollama/
+.pm2/
+.profile
+.ssh/
+.sudo_as_admin_successful
+.vscode/
+snap/
+fronted/.git

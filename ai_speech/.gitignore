@@ -1,0 +1,26 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environment
+venv/
+.env
+
+# Logs
+*.log
+
+# VSCode and IDE configs
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+
+# Audio temp files
+audio_folder/
+text_to_speech_audio_folder/
+uploads/
+
+# Firebase secrets
+firebase_key.json

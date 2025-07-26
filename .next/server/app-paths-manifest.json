@@ -1,0 +1,16 @@
+{
+  "/_not-found/page": "app/_not-found/page.js",
+  "/favicon.ico/route": "app/favicon.ico/route.js",
+  "/forgetpassword/page": "app/forgetpassword/page.js",
+  "/page": "app/page.js",
+  "/profile/page": "app/profile/page.js",
+  "/signin/page": "app/signin/page.js",
+  "/signup/page": "app/signup/page.js",
+  "/(authenticated)/chat/page": "app/(authenticated)/chat/page.js",
+  "/(authenticated)/dashboard/page": "app/(authenticated)/dashboard/page.js",
+  "/(authenticated)/practice/page": "app/(authenticated)/practice/page.js",
+  "/(authenticated)/practice/teacher/page": "app/(authenticated)/practice/teacher/page.js",
+  "/(authenticated)/result/page": "app/(authenticated)/result/page.js",
+  "/(authenticated)/teacher/page": "app/(authenticated)/teacher/page.js",
+  "/(authenticated)/voiceassistant/page": "app/(authenticated)/voiceassistant/page.js"
+}
