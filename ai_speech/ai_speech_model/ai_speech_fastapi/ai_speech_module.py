@@ -313,7 +313,7 @@ class Topic:
             return ""
 
     def _speech_to_text(self, audio_path: str, device=None) -> str:
-        token = "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"
+#        token = "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"
         API_URL = "https://api-inference.huggingface.co/models/openai/whisper-large-v3"
         headers = {
             "Authorization": f"Bearer {token}",

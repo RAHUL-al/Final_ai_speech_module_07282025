@@ -1,3 +1,7 @@
+from datetime import timezone
+from google.cloud.firestore_v1.base_query import FieldFilter
+from schemas import UserCreate, PasswordResetRequest, ForgotPasswordRequest, UserOut, UserUpdate, Token, LoginRequest, ForgotPasswordRequest, GeminiRequest, ChatRequest
+from fastapi import Body
 from fastapi.websockets import WebSocketState
 import asyncio
 from langchain_core.prompts import PromptTemplate
@@ -47,7 +51,6 @@ from fastapi import HTTPException, status
 from langchain.prompts import PromptTemplate
 from langchain.chains import RetrievalQA
 from langchain_community.vectorstores import Pinecone as PineconeVectorStore
-# from langchain_community.vectorstores import Pinecone
 from PIL import Image, ImageDraw, ImageFont
 from PIL import Image, ImageDraw, ImageFont
 from pdf2image import convert_from_path
@@ -72,10 +75,26 @@ import asyncio
 import logging
 from datetime import datetime
 from urllib.parse import parse_qs
-
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks
+import os
+import shutil
+import time
+import logging
+import asyncio
+import uuid
+from typing import List, Dict
+from PIL import Image, ImageDraw, ImageFont
+from pdf2image import convert_from_path
+import docx2txt
+from pptx import Presentation
+import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import google.generativeai as genai
+import torch
 from fastapi import WebSocket, WebSocketDisconnect
 from pydub import AudioSegment
 import aiohttp
+
 CPU_API_BASE = "http://13.200.201.10:8000"
 model_name = OllamaLLM(model="mistral")
 scraping_api_key = os.getenv("SCRAPINGDOG_API_KEY")
@@ -135,6 +154,145 @@ def register(user: UserCreate):
     user_id = doc_ref[1].id
     return UserOut(id=user_id, username=user.username, email=user.email)
 
+from fastapi.concurrency import run_in_threadpool
+from fastapi import BackgroundTasks
+from fastapi_mail import FastMail, MessageSchema, ConnectionConfig
+from pydantic import EmailStr
+import secrets
+import string
+from typing import Optional
+
+PASSWORD_RESET_TOKEN_EXPIRE_HOURS = 1
+
+# Email Configuration
+mail_conf = ConnectionConfig(
+    MAIL_USERNAME=os.getenv("MAIL_USERNAME", "testampli2023@gmail.com"),
+    MAIL_PASSWORD=os.getenv("MAIL_PASSWORD", "mulpeeeuolzidejx"),
+    MAIL_FROM=os.getenv("MAIL_FROM", "testampli2023@gmail.com"),
+    MAIL_PORT=int(os.getenv("MAIL_PORT", 587)),
+    MAIL_SERVER=os.getenv("MAIL_SERVER", "smtp.gmail.com"),
+    MAIL_STARTTLS=bool(os.getenv("MAIL_STARTTLS", True)),
+    MAIL_SSL_TLS=bool(os.getenv("MAIL_SSL_TLS", False)),
+    USE_CREDENTIALS=True,
+    VALIDATE_CERTS=True
+)
+
+
+def generate_reset_token(user_id: str):
+    """Generate JWT token for password reset"""
+    expires = datetime.now(timezone.utc) + timedelta(hours=PASSWORD_RESET_TOKEN_EXPIRE_HOURS)
+    payload = {
+        "sub": user_id,
+        "exp": expires,
+        "type": "password_reset"
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+@app.post("/forgot-password")
+async def forgot_password(request: ForgotPasswordRequest, background_tasks: BackgroundTasks):
+    try:
+        # Validate email format
+        if not request.email or "@" not in request.email:
+            return {"detail": "If this email exists in our system, you'll receive a password reset link"}
+
+        # Find user in Firestore
+        docs = db.collection("users").where(filter=FieldFilter("email", "==", request.email)).stream()
+        user_doc = next(docs, None)
+
+        if not user_doc:
+            logging.info(f"Password reset requested for non-existent email: {request.email}")
+            return {"detail": "If this email exists in our system, you'll receive a password reset link"}
+
+        # Generate JWT token
+        reset_token = generate_reset_token(user_doc.id)
+        token_expiry = datetime.now(timezone.utc) + timedelta(hours=PASSWORD_RESET_TOKEN_EXPIRE_HOURS)
+
+        # Store token in Redis (for additional validation if needed)
+        redis_client.setex(
+            f"reset_token:{reset_token}",
+            int(timedelta(hours=PASSWORD_RESET_TOKEN_EXPIRE_HOURS).total_seconds()),
+            json.dumps({
+                "user_id": user_doc.id,
+                "email": request.email,
+                "expires_at": token_expiry.isoformat()
+            })
+        )
+
+        # Send email
+        await send_reset_email(request.email, reset_token, background_tasks)
+        logging.info(f"Password reset token generated for {request.email}")
+
+        return {"detail": "If this email exists in our system, you'll receive a password reset link"}
+
+    except Exception as e:
+        logging.error(f"Error in forgot-password for {request.email}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while processing your request"
+        )
+
+
+@app.get("/validate-reset-token/{token}")
+async def validate_reset_token_endpoint(token: str):
+    try:
+        # First validate the JWT structure
+        # payload = await validate_reset_token(token)
+        
+        # Then check Redis for additional validation
+        token_data = redis_client.get(f"session:{token}")
+
+        logging.info(f"token data {token_data}")
+
+        if not token_data:
+            raise HTTPException(status_code=400, detail="Invalid or expired token")
+            
+        return {"valid": True, "email": json.loads(token_data)["username"]}
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logging.error(f"Error validating token: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired token"
+        )
+
+
+@app.post("/reset-password")
+async def reset_password(request: PasswordResetRequest = Body(...)):
+    try:
+        # Validate token structure first
+        payload = await validate_reset_token(request.token)
+        user_id = payload["sub"]
+        
+        # Check Redis for additional validation
+        token_data_raw = redis_client.get(f"reset_token:{request.token}")
+        if not token_data_raw:
+            raise HTTPException(status_code=400, detail="Invalid or expired token")
+            
+        # Update password
+        db.collection("users").document(user_id).update({
+            "password": hash_password(request.new_password),
+            "updated_at": datetime.now(timezone.utc)
+        })
+        
+        # Delete the used token
+        redis_client.delete(f"reset_token:{request.token}")
+        
+        logging.info(f"Password reset successful for user {user_id}")
+        return {"detail": "Password has been reset successfully"}
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logging.error(f"Error resetting password: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while resetting your password"
+        )
+
+
 @app.post("/login", response_model=Token)
 def login(data: LoginRequest):
     docs = db.collection("users").where("username", "==", data.username).stream()
@@ -143,8 +301,11 @@ def login(data: LoginRequest):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Bad credentials")
 
     token = create_access_token({"sub": user_doc.id})
+    logging.info(f"token in login file : {token}")
     redis_client.setex(f"session:{token}", timedelta(hours=1), json.dumps({"user_id": user_doc.id, "username": data.username}))
     return Token(access_token=token, username=data.username)
+
+
 
 @app.get("/logout")
 def logout(request: Request):
@@ -396,22 +557,6 @@ def get_tts_audio(username: str):
 
 
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks
-import os
-import shutil
-import time
-import logging
-import asyncio
-import uuid
-from typing import List, Dict
-from PIL import Image, ImageDraw, ImageFont
-from pdf2image import convert_from_path
-import docx2txt
-from pptx import Presentation
-import pandas as pd
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import google.generativeai as genai
-import torch
 
 SUPPORTED_IMAGE_FORMATS = [".png", ".jpg", ".jpeg"]
 SUPPORTED_TEXT_FORMATS = [".txt"]
@@ -484,11 +629,9 @@ def file_to_images(file_path: str) -> List[Image.Image]:
     images = []
 
     if ext in SUPPORTED_PDF_FORMATS:
-        # Use multiple threads for PDF conversion
         with ThreadPoolExecutor() as pdf_executor:
             futures = []
-            # Split PDF conversion into chunks
-            chunk_size = 10  # Number of pages per chunk
+            chunk_size = 10
             images = convert_from_path(file_path, dpi=200, thread_count=4)
 
     elif ext in SUPPORTED_IMAGE_FORMATS:
@@ -546,7 +689,7 @@ async def process_single_image(image: Image.Image, idx: int) -> str:
         logging.error(f"OCR failed on image {idx + 1}: {e}")
         return f"\n\n--- Page/Image {idx + 1} FAILED ---"
 
-async def extract_text_parallel(file_path: str, timeout_per_page: int = 60) -> str:
+async def extract_text_parallel(file_path: str, timeout_per_page: int = 120) -> str:
     """Parallel text extraction from all pages/images"""
     images = await run_in_threadpool(file_to_images, file_path)
     if not images:
@@ -579,7 +722,7 @@ async def extract_text_parallel(file_path: str, timeout_per_page: int = 60) -> s
     
     return all_text
 
-async def extract_text_with_retry(file_path: str, timeout=240, max_retries=3) -> tuple[str, bool]:
+async def extract_text_with_retry(file_path: str, timeout=360, max_retries=3) -> tuple[str, bool]:
     """Enhanced OCR extraction with timeout tracking and parallel processing"""
     last_error = None
     timeout_occurred = False
@@ -1132,9 +1275,6 @@ async def audio_ws(websocket: WebSocket):
         logging.error(f"Unexpected error: {str(e)}", exc_info=True)
     finally:
         essay_id = finalize_session(session_state, username, session_temp_dir, topic,essay_id,chat_history)
-
-
-
 
 
 
