@@ -23,7 +23,6 @@ const ResetPassword = () => {
   const router = useRouter();
   const params = useParams();
   const token = params.token as string;
-  console.log("11111111111111111111555555555555555555%%%%%%%%%", token);
 
   //   useEffect(() => {
   //     if (token) {
@@ -39,7 +38,7 @@ const ResetPassword = () => {
         const response = await fetch(
           `${process.env.NEXT_PUBLIC_API_URL}/validate-reset-token/${token}`
         );
-        console.log("response88888888888888888888888", response);
+
         if (response.ok) {
           const data = await response.json();
           setValidToken(true);

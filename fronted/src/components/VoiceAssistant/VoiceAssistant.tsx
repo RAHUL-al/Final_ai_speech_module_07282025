@@ -1,5 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import { useAppDispatch, useAppSelector } from "@/store";
+import { fetchOverallScoring } from "@/store/slices/assistant/assistantSlice";
+import { useRouter } from "next/navigation";
 
 const getUsername = () => {
   return localStorage.getItem("username") || "unknown_user";
@@ -20,20 +23,38 @@ const getAuthToken = () => {
 };
 
 const CLASS_OPTIONS = [
-  "Class 1", "Class 2", "Class 3", "Class 4", "Class 5", 
-  "Class 6", "Class 7", "Class 8", "Class 9", "Class 10"
+  "Class 1",
+  "Class 2",
+  "Class 3",
+  "Class 4",
+  "Class 5",
+  "Class 6",
+  "Class 7",
+  "Class 8",
+  "Class 9",
+  "Class 10",
 ];
 
 const ACCENT_OPTIONS = [
-  "American", "British", "Australian", "Indian", "Canadian"
+  "American",
+  "British",
+  "Australian",
+  "Indian",
+  "Canadian",
 ];
 
 const MOOD_OPTIONS = [
-  "Neutral", "Happy", "Excited", "Calm", "Serious", "Playful"
+  "Neutral",
+  "Happy",
+  "Excited",
+  "Calm",
+  "Serious",
+  "Playful",
 ];
 
-
 export default function VoiceAssistant() {
+  const dispatch = useAppDispatch();
+  const router = useRouter();
   const [status, setStatus] = useState("idle");
   const [audioLevel, setAudioLevel] = useState(0);
   const [transcription, setTranscription] = useState("");
@@ -52,11 +73,33 @@ export default function VoiceAssistant() {
   const audioQueueRef = useRef([]);
   const playbackContextRef = useRef(null); // New ref for playback context
 
-    const [classOption, setClassOption] = useState(CLASS_OPTIONS[0]);
-  const [accentOption, setAccentOption] = useState(ACCENT_OPTIONS[0]);
+  const [classOption, setClassOption] = useState("");
+  const [accentOption, setAccentOption] = useState("");
   const [topicInput, setTopicInput] = useState("");
-  const [moodOption, setMoodOption] = useState(MOOD_OPTIONS[0]);
+  const [moodOption, setMoodOption] = useState("");
+  const [errors, setErrors] = useState({
+    class: false,
+    accent: false,
+    topic: false,
+    mood: false,
+  });
 
+  const scoringState = useAppSelector((state) => state.assistant);
+  const [essayId, setEssayId] = useState("");
+  const [showResultButton, setShowResultButton] = useState(false);
+  const [loadingResult, setLoadingResult] = useState(false);
+  const [loadingText, setLoadingText] = useState("Preparing your results...");
+
+  const validateForm = () => {
+    const newErrors = {
+      class: !classOption,
+      accent: !accentOption,
+      topic: !topicInput.trim(),
+      mood: !moodOption,
+    };
+    setErrors(newErrors);
+    return !Object.values(newErrors).some((error) => error);
+  };
 
   useEffect(() => {
     return () => {
@@ -195,6 +238,13 @@ export default function VoiceAssistant() {
   };
 
   const initWebRTC = async () => {
+    setEssayId("");
+    setShowResultButton(false);
+    setLoadingResult(false);
+
+    if (!validateForm()) {
+      return;
+    }
     try {
       setStatus("connecting");
       console.log("Getting user media...");
@@ -246,6 +296,7 @@ export default function VoiceAssistant() {
       pc.onicecandidate = (event) => {
         if (event.candidate) {
           const ws = wsRef.current;
+
           if (ws && ws.readyState === WebSocket.OPEN) {
             console.log("Sending ICE candidate", event.candidate);
             ws.send(
@@ -355,9 +406,14 @@ export default function VoiceAssistant() {
         }
         // Handle text messages
         else if (typeof event.data === "string") {
+          console.log("111111111111111111111111");
           try {
             const message = JSON.parse(event.data);
-
+            console.log("message", message);
+            if (message.essay_id) {
+              console.log("Received essay ID:", message.essay_id);
+              setEssayId(message.essay_id);
+            }
             if (message.type === "answer") {
               console.log("Received answer");
               await pc.setRemoteDescription(new RTCSessionDescription(message));
@@ -468,6 +524,39 @@ export default function VoiceAssistant() {
   const stopAssistant = () => {
     setStatus("idle");
     cleanup();
+    if (essayId) {
+      setLoadingResult(true);
+      setTimeout(() => {
+        setLoadingResult(false);
+        setShowResultButton(true);
+      }, 3000);
+    }
+  };
+
+  const handleShowResult = async () => {
+    if (essayId) {
+      try {
+        setLoadingResult(true);
+        setLoadingText("Preparing your results...");
+
+        // Set timeout to update loading text after 15 seconds
+        const textTimeout = setTimeout(() => {
+          if (loadingResult) {
+            setLoadingText("Almost there, finalizing results...");
+          }
+        }, 15000);
+
+        // Fetch scoring data and wait
+        await dispatch(fetchOverallScoring(essayId)).unwrap();
+
+        // Clear timeout and navigate
+        clearTimeout(textTimeout);
+        router.push(`/assistantresult?essay_id=${essayId}`);
+      } catch (error) {
+        console.error("Failed to fetch scoring:", error);
+        setLoadingResult(false);
+      }
+    }
   };
 
   const statusColors = {
@@ -493,18 +582,25 @@ export default function VoiceAssistant() {
           <h1 className="text-2xl font-bold text-white">Speech Assistant</h1>
           <p className="text-indigo-200 mt-1">AI-powered voice assistant</p>
         </div>
-         {/* Settings Panel */}
         <div className="p-6 border-b border-gray-200">
-          <h2 className="text-lg font-semibold text-gray-800 mb-3">Assistant Settings</h2>
-          
+          <h2 className="text-lg font-semibold text-gray-800 mb-3">
+            Assistant Settings
+          </h2>
+
           <div className="grid grid-cols-2 gap-4">
-            {/* Class Dropdown */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Class</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Class {errors.class && <span className="text-red-600">*</span>}
+              </label>
               <select
                 value={classOption}
-                onChange={(e) => setClassOption(e.target.value)}
-                className="w-full text-black rounded-lg border border-gray-300 bg-white py-2 px-3 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                onChange={(e) => {
+                  setClassOption(e.target.value);
+                  if (errors.class) setErrors({ ...errors, class: false });
+                }}
+                className={`w-full text-black rounded-lg border ${
+                  errors.class ? "border-red-500" : "border-gray-300"
+                } bg-white py-2 px-3 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent`}
               >
                 {CLASS_OPTIONS.map((option) => (
                   <option key={option} value={option}>
@@ -512,15 +608,28 @@ export default function VoiceAssistant() {
                   </option>
                 ))}
               </select>
+              {errors.class && (
+                <p className="mt-1 text-sm text-red-600">
+                  Please select a class
+                </p>
+              )}
             </div>
 
             {/* Accent Dropdown */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Accent</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Accent{" "}
+                {errors.accent && <span className="text-red-600">*</span>}
+              </label>
               <select
                 value={accentOption}
-                onChange={(e) => setAccentOption(e.target.value)}
-                className="w-full text-black rounded-lg border border-gray-300 bg-white py-2 px-3 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                onChange={(e) => {
+                  setAccentOption(e.target.value);
+                  if (errors.accent) setErrors({ ...errors, accent: false });
+                }}
+                className={`w-full text-black rounded-lg border ${
+                  errors.accent ? "border-red-500" : "border-gray-300"
+                } bg-white py-2 px-3 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent`}
               >
                 {ACCENT_OPTIONS.map((option) => (
                   <option key={option} value={option}>
@@ -528,27 +637,50 @@ export default function VoiceAssistant() {
                   </option>
                 ))}
               </select>
+              {errors.accent && (
+                <p className="mt-1 text-sm text-red-600">
+                  Please select an accent
+                </p>
+              )}
             </div>
 
             {/* Topic Input */}
             <div className="col-span-2">
-              <label className="block text-sm font-medium text-gray-700 mb-1">Topic</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Topic {errors.topic && <span className="text-red-600">*</span>}
+              </label>
               <input
                 type="text"
                 value={topicInput}
-                onChange={(e) => setTopicInput(e.target.value)}
+                onChange={(e) => {
+                  setTopicInput(e.target.value);
+                  if (errors.topic) setErrors({ ...errors, topic: false });
+                }}
                 placeholder="Enter discussion topic"
-                className="w-full text-black rounded-lg border border-gray-300 bg-white py-2 px-3 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                className={`w-full text-black rounded-lg border ${
+                  errors.topic ? "border-red-500" : "border-gray-300"
+                } bg-white py-2 px-3 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent`}
               />
+              {errors.topic && (
+                <p className="mt-1 text-sm text-red-600">
+                  Please enter a topic
+                </p>
+              )}
             </div>
 
-            {/* Mood Dropdown */}
             <div className="col-span-2">
-              <label className="block text-sm font-medium text-gray-700 mb-1">Mood</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Mood {errors.mood && <span className="text-red-600">*</span>}
+              </label>
               <select
                 value={moodOption}
-                onChange={(e) => setMoodOption(e.target.value)}
-                className="w-full text-black rounded-lg border border-gray-300 bg-white py-2 px-3 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                onChange={(e) => {
+                  setMoodOption(e.target.value);
+                  if (errors.mood) setErrors({ ...errors, mood: false });
+                }}
+                className={`w-full text-black rounded-lg border ${
+                  errors.mood ? "border-red-500" : "border-gray-300"
+                } bg-white py-2 px-3 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent`}
               >
                 {MOOD_OPTIONS.map((option) => (
                   <option key={option} value={option}>
@@ -556,10 +688,14 @@ export default function VoiceAssistant() {
                   </option>
                 ))}
               </select>
+              {errors.mood && (
+                <p className="mt-1 text-sm text-red-600">
+                  Please select a mood
+                </p>
+              )}
             </div>
           </div>
         </div>
-
 
         <div className="p-8 flex flex-col items-center">
           <div className="relative mb-8">
@@ -622,7 +758,6 @@ export default function VoiceAssistant() {
               </div>
             </div>
 
-            {/* Audio Visualizer */}
             {(status === "connected" || status === "playing") && (
               <div className="absolute bottom-0 left-0 right-0 flex justify-center space-x-1 h-8">
                 {Array.from({ length: 15 }).map((_, i) => (
@@ -709,6 +844,40 @@ export default function VoiceAssistant() {
           <p className="text-sm text-gray-700 font-semibold">Transcription:</p>
           <p className="text-gray-600 break-words">{transcription}</p>
         </div>
+      </div>
+      <div className="mt-6 flex flex-col items-center">
+        {/* Loading indicator */}
+        {loadingResult && (
+          <div className="flex flex-col items-center">
+            <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mb-2"></div>
+            <p className="text-gray-600 max-w-xs text-center">{loadingText}</p>
+            <p className="text-xs text-gray-500 mt-2">
+              This may take up to 15 seconds...
+            </p>
+          </div>
+        )}
+
+        {/* Result button */}
+        {showResultButton && !loadingResult && (
+          <motion.button
+            onClick={handleShowResult}
+            className="mt-4 bg-gradient-to-r from-indigo-600 to-purple-600 text-white font-medium py-3 px-8 rounded-full shadow-lg"
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3 }}
+          >
+            View Detailed Results
+          </motion.button>
+        )}
+
+        {/* Error message */}
+        {scoringState.error && (
+          <p className="mt-2 text-red-500 text-sm">
+            Error loading results: {scoringState.error}
+          </p>
+        )}
       </div>
       <audio
         ref={localAudioRef}

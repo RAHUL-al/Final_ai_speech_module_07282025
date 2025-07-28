@@ -42,3 +42,10 @@ body {
   animation: wave 1s infinite ease-in-out;
   animation-delay: calc(var(--index) * 0.2s);
 } */
+
+@media (max-width: 767px) {
+  .sidebar-open main {
+    filter: blur(2px);
+    transition: filter 0.3s ease;
+  }
+}

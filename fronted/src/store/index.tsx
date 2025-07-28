@@ -6,6 +6,7 @@ import practiceSlice from "@/store/slices/practiceSlice";
 import teacherReducer from "./slices/teacherSlice";
 import chatReducer from "./slices/chatSlice";
 import { TypedUseSelectorHook } from "react-redux";
+import assistantSlice from "@/store/slices/assistant/assistantSlice";
 
 export function makeStore() {
   return configureStore({
@@ -15,6 +16,7 @@ export function makeStore() {
       practice: practiceSlice,
       teacher: teacherReducer,
       chat: chatReducer,
+      assistant: assistantSlice,
     },
     middleware: (getDefaultMiddleware) =>
       getDefaultMiddleware({

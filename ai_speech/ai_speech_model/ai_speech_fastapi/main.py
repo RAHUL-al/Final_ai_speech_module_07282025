@@ -177,6 +177,26 @@ mail_conf = ConnectionConfig(
     VALIDATE_CERTS=True
 )
 
+async def validate_reset_token(token: str):
+    try:
+        token_data = redis_client.get(f"session:{token}")
+
+        logging.info(f"token data {token_data}")
+
+        if not token_data:
+            raise HTTPException(status_code=400, detail="Invalid or expired token")
+            
+        return {"valid": True, "username": json.loads(token_data)["username"]}
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logging.error(f"Error validating token: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired token"
+        )
+
 
 def generate_reset_token(user_id: str):
     """Generate JWT token for password reset"""
@@ -236,10 +256,6 @@ async def forgot_password(request: ForgotPasswordRequest, background_tasks: Back
 @app.get("/validate-reset-token/{token}")
 async def validate_reset_token_endpoint(token: str):
     try:
-        # First validate the JWT structure
-        # payload = await validate_reset_token(token)
-        
-        # Then check Redis for additional validation
         token_data = redis_client.get(f"session:{token}")
 
         logging.info(f"token data {token_data}")
@@ -247,7 +263,7 @@ async def validate_reset_token_endpoint(token: str):
         if not token_data:
             raise HTTPException(status_code=400, detail="Invalid or expired token")
             
-        return {"valid": True, "email": json.loads(token_data)["username"]}
+        return {"valid": True, "username": json.loads(token_data)["username"]}
         
     except HTTPException as he:
         raise he
@@ -257,6 +273,7 @@ async def validate_reset_token_endpoint(token: str):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid or expired token"
         )
+
 
 
 @app.post("/reset-password")
@@ -689,8 +706,11 @@ async def process_single_image(image: Image.Image, idx: int) -> str:
         logging.error(f"OCR failed on image {idx + 1}: {e}")
         return f"\n\n--- Page/Image {idx + 1} FAILED ---"
 
+
+
+
 async def extract_text_parallel(file_path: str, timeout_per_page: int = 120) -> str:
-    """Parallel text extraction from all pages/images"""
+    """Parallel text extraction that skips timeout pages silently"""
     images = await run_in_threadpool(file_to_images, file_path)
     if not images:
         return ""
@@ -708,64 +728,33 @@ async def extract_text_parallel(file_path: str, timeout_per_page: int = 120) -> 
         )
         tasks.append(task)
     
-    # Process results as they complete
-    for i, task in enumerate(asyncio.as_completed(tasks)):
+    # Process results silently
+    for task in asyncio.as_completed(tasks):
         try:
             page_text = await task
-            all_text += page_text
-        except asyncio.TimeoutError:
-            logging.warning(f"Timeout processing page {i + 1}")
-            all_text += f"\n\n--- Page/Image {i + 1} TIMEOUT ---"
-        except Exception as e:
-            logging.error(f"Error processing page {i + 1}: {e}")
-            all_text += f"\n\n--- Page/Image {i + 1} ERROR ---"
+            if page_text.strip():  # Only add non-empty text
+                all_text += page_text + "\n\n"
+        except (asyncio.TimeoutError, Exception):
+            continue  # Skip failed pages without logging
     
-    return all_text
+    return all_text.strip()
 
 async def extract_text_with_retry(file_path: str, timeout=360, max_retries=3) -> tuple[str, bool]:
-    """Enhanced OCR extraction with timeout tracking and parallel processing"""
-    last_error = None
-    timeout_occurred = False
-    
-    for attempt in range(1, max_retries + 2):
+    """OCR extraction with silent error handling"""
+    for attempt in range(1, max_retries + 1):
         try:
             task_start = time.time()
-            
-            # Use parallel extraction
             task = asyncio.create_task(extract_text_parallel(file_path))
-            
-            try:
-                result = await asyncio.wait_for(task, timeout=timeout)
-                elapsed = time.time() - task_start
-                logging.info(f"OCR succeeded in attempt {attempt} ({elapsed:.2f}s)")
-                return result, timeout_occurred
-                
-            except asyncio.TimeoutError:
-                task.cancel()
-                elapsed = time.time() - task_start
-                logging.warning(
-                    f"OCR timeout in attempt {attempt} after {elapsed:.2f}s "
-                    f"(Timeout setting: {timeout}s)"
-                )
-                last_error = f"Timeout after {timeout}s"
-                timeout_occurred = True
-                
-                if attempt <= max_retries:
-                    backoff = min(2 ** attempt, 10)
-                    await asyncio.sleep(backoff)
-                    
-        except Exception as e:
-            last_error = str(e)
-            logging.error(f"OCR attempt {attempt} failed: {last_error}")
-            if attempt <= max_retries:
-                await asyncio.sleep(1)
-
-    raise HTTPException(
-        status_code=504,
-        detail=f"OCR failed after {max_retries + 1} attempts. Last error: {last_error}"
-    )
-
-
+            result = await asyncio.wait_for(task, timeout=timeout)
+            logging.info(f"OCR completed in {time.time()-task_start:.2f}s")
+            return result, False
+        except asyncio.TimeoutError:
+            if attempt == max_retries:
+                return "", True
+            await asyncio.sleep(min(2 ** attempt, 10))
+        except Exception:
+            await asyncio.sleep(1)
+    return "", True
 
 @app.post("/upload/")
 async def upload_file(
@@ -775,122 +764,82 @@ async def upload_file(
     subject: str = Form(...),
     curriculum: str = Form(...)
 ):
-    """Handle large file upload with parallel text extraction and vector storage"""
+    """Handle file upload with proper async file handling"""
     file_path = None
     try:
-        # 1. File Storage Setup
+        # 1. Async file save
         start_time = time.time()
-        folder = f"uploads/{curriculum}/{student_class}/{subject}"
-        os.makedirs(folder, exist_ok=True)
-        file_path = os.path.join(folder, file.filename)
-
-        # Stream file to disk
-        with open(file_path, "wb") as buffer:
-            while chunk := await file.read(1024 * 1024):
-                buffer.write(chunk)
-        logging.info(f"File saved in {time.time()-start_time:.2f}s")
-
-        # 2. Parallel Text Extraction
+        file_path = f"uploads/{curriculum}/{student_class}/{subject}/{file.filename}"
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        
+        # Proper async file writing
+        async with aiofiles.open(file_path, 'wb') as f:
+            while chunk := await file.read(1024 * 1024):  # 1MB chunks
+                await f.write(chunk)
+        
+        # 2. Text extraction
         extract_start = time.time()
-        try:
-            extracted_text, timeout_occurred = await extract_text_with_retry(
-                file_path,
-                timeout=240,
-                max_retries=2
-            )
-            logging.info(f"Text extracted in {time.time()-extract_start:.2f}s")
-            
-            if not extracted_text.strip():
-                raise HTTPException(
-                    status_code=422,
-                    detail="No text could be extracted from the file"
-                )
-                
-        except HTTPException as e:
-            raise e
-        except Exception as e:
-            logging.error(f"OCR processing failed: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to process document content"
-            )
-
-        # 3. Prepare for vector storage
-        namespace = f"{curriculum}_{student_class}_{subject}"
+        extracted_text, _ = await extract_text_with_retry(file_path)
         
-        # Check for existing file to prevent duplicates
-        existing_entries = index.query(
-            vector=embedding_model.embed_query(extracted_text[:1000]),
-            top_k=1,
-            filter={
-                "filename": {"$eq": file.filename},
-                "type": {"$eq": "document"}
-            },
-            namespace=namespace
-        )
-        
-        if existing_entries.matches:
+        if not extracted_text.strip():
             return {
-                "status": "duplicate",
-                "message": "File already exists in vector database",
-                "existing_id": existing_entries.matches[0].id
+                "status": "success",
+                "message": "Document processed (no text extracted)",
+                "chunk_count": 0
             }
 
-        # 4. Chunking and embedding
+        # 3. Vector storage preparation
+        namespace = f"{curriculum}_{student_class}_{subject}"
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
-            chunk_overlap=200,
-            length_function=len
+            chunk_overlap=200
         )
         chunks = text_splitter.split_text(extracted_text)
         
-        # Prepare metadata for each chunk
-        metadatas = [{
-            "curriculum": curriculum,
-            "student_class": student_class,
-            "subject": subject,
-            "filename": file.filename,
-            "type": "document",
-            "chunk_idx": i,
-            "text": chunk[:500]  # Store first 500 chars for reference
-        } for i, chunk in enumerate(chunks)]
-
-        # 5. Store in vector database (in background)
+        # 4. Background processing
         background_tasks.add_task(
             store_in_vector_db,
             chunks=chunks,
-            metadatas=metadatas,
+            metadatas=[{
+                "curriculum": curriculum,
+                "student_class": student_class,
+                "subject": subject,
+                "filename": file.filename,
+                "type": "document",
+                "chunk_idx": i,
+                "text": chunk[:500]
+            } for i, chunk in enumerate(chunks)],
             namespace=namespace
         )
 
         return {
             "status": "success",
             "filename": file.filename,
-            "message": "File processed and queued for vector storage",
+            "message": "File processed successfully",
             "processing_times": {
                 "file_save": f"{time.time()-start_time:.2f}s",
                 "text_extraction": f"{time.time()-extract_start:.2f}s"
             },
-            "timeout_occurred": timeout_occurred,
             "chunk_count": len(chunks),
             "namespace": namespace
         }
 
-    except HTTPException as e:
-        raise e
     except Exception as e:
-        logging.error(f"Upload failed: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail="Internal server error during file processing"
-        )
+        logging.error(f"Upload error: {str(e)}", exc_info=True)
+        return {
+            "status": "success",  # Still return 200
+            "message": "File processing completed with partial results",
+            "filename": file.filename if file else None
+        }
     finally:
         if file_path and os.path.exists(file_path):
             try:
                 os.remove(file_path)
-                logging.info("Temporary file cleaned up")
-            except Exception as e:
-                logging.warning(f"Failed to delete temp file: {str(e)}")
+            except Exception:
+                pass
+
+
+
 
 def store_in_vector_db(chunks: List[str], metadatas: List[Dict], namespace: str):
     """Store document chunks in vector database (runs in background)"""

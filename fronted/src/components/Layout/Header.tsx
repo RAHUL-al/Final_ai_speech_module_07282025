@@ -8,8 +8,12 @@ import { useAppDispatch } from "@/store";
 import { logoutUser } from "@/store/slices/authSlice";
 import Button from "@/components/UI/Button";
 import { motion, AnimatePresence } from "framer-motion";
+import { SlOptionsVertical } from "react-icons/sl";
+interface HeaderProps {
+  setSidebarOpen: (open: boolean) => void;
+}
 
-const Header = () => {
+const Header = ({ setSidebarOpen }: HeaderProps) => {
   const router = useRouter();
   const dispatch = useAppDispatch();
   const [showMobileMenu, setShowMobileMenu] = useState(false);
@@ -21,8 +25,18 @@ const Header = () => {
 
   return (
     <header className="fixed top-0 left-0 right-0 z-50 bg-gradient-to-r from-indigo-600 to-purple-600 shadow-lg">
-      <div className="max-w-7xl mx-52 px-4 sm:px-6 lg:px-8">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center h-16">
+          {/* <div className="mr-2 md:hidden">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setSidebarOpen(true)}
+              className="text-white p-2"
+            >
+              <Menu className="h-6 w-6" />
+            </Button>
+          </div> */}
           <div className="flex items-center">
             <motion.div
               initial={{ scale: 0.8 }}
@@ -85,7 +99,7 @@ const Header = () => {
                 {showMobileMenu ? (
                   <X className="h-6 w-6" />
                 ) : (
-                  <Menu className="h-6 w-6" />
+                  <SlOptionsVertical className="h-6 w-6" />
                 )}
               </Button>
             </div>

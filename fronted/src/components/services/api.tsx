@@ -31,7 +31,9 @@ export function setTokens({ access, refresh }: Tokens): void {
 }
 
 async function handleResponse(response: Response): Promise<any> {
-  if (response.status === 401) {
+  const isValidationRequest = response.url.includes("/validate-token");
+
+  if (response.status === 401 && !isValidationRequest) {
     if (typeof window !== "undefined") {
       localStorage.removeItem("access_token");
       localStorage.removeItem("refresh_token");

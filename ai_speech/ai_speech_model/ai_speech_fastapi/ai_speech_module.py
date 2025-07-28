@@ -300,7 +300,7 @@ class Topic:
             return {"error": "Internal Server Error"}
 
 	
-    async def speech_to_text(self, audio_path: str, username: str, device=None) -> str:
+    async def speech_to_text(self, audio_path: str, device=None) -> str:
         try:
             # Run the synchronous _speech_to_text in a thread
             return await asyncio.to_thread(
@@ -313,7 +313,7 @@ class Topic:
             return ""
 
     def _speech_to_text(self, audio_path: str, device=None) -> str:
-#        token = "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"
+        token = "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"
         API_URL = "https://api-inference.huggingface.co/models/openai/whisper-large-v3"
         headers = {
             "Authorization": f"Bearer {token}",

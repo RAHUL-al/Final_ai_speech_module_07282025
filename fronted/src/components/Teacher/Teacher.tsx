@@ -3,7 +3,7 @@
 "use client";
 
 import React, { useCallback, useState } from "react";
-import { useDropzone } from "react-dropzone";
+import { FileRejection, useDropzone } from "react-dropzone";
 import { useDispatch, useSelector } from "react-redux";
 import { RootState, AppDispatch } from "@/store/index";
 import { useRouter } from "next/navigation";
@@ -13,6 +13,7 @@ import {
   setCurriculum,
   processFiles,
   resetUpload,
+  clearUploadResults,
 } from "@/store/slices/teacherSlice";
 import Button from "@/components/UI/Button";
 import Progress from "@/components/UI/Progress";
@@ -25,6 +26,9 @@ import {
   Bookmark,
   GraduationCap,
   LayoutGrid,
+  CheckCircle,
+  AlertCircle,
+  XCircle,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -39,18 +43,41 @@ const Teacher = () => {
     error,
     progress,
     ocrResults,
+    uploadResults,
   } = useSelector((state: RootState) => state.teacher);
 
   const [showResults, setShowResults] = useState(false);
   const [localFiles, setLocalFiles] = useState<File[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [errors, setErrors] = useState({
+    class: false,
+    subject: false,
+    curriculum: false,
+    files: false,
+  });
 
-  const onDrop = useCallback((acceptedFiles: File[]) => {
-    setLocalFiles((prev: File[]) => [...prev, ...acceptedFiles]);
-  }, []);
+  const [fileErrors, setFileErrors] = useState<
+    { fileName: string; error: string }[]
+  >([]);
+  const onDrop = useCallback(
+    (acceptedFiles: File[], fileRejections: FileRejection[]) => {
+      // Replace existing files with the new file
+      setLocalFiles(acceptedFiles.slice(0, 1)); // Only take the first file
 
-  const handleRemoveFile = (fileName: string) => {
-    setLocalFiles((prev) => prev.filter((file) => file.name !== fileName));
+      // Handle rejected files
+      const newFileErrors = fileRejections.map((rejection) => ({
+        fileName: rejection.file.name,
+        error: rejection.errors[0].message,
+      }));
+
+      setFileErrors(newFileErrors); // Replace errors
+    },
+    []
+  );
+
+  const handleRemoveFile = () => {
+    setLocalFiles([]);
+    setFileErrors([]);
   };
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
@@ -61,16 +88,31 @@ const Teacher = () => {
       "application/vnd.ms-powerpoint": [".ppt", ".pptx"],
     },
     maxSize: 10 * 1024 * 1024, // 10MB
+    multiple: false,
   });
+  const validateForm = () => {
+    const newErrors = {
+      class: !className,
+      subject: !subject,
+      curriculum: !curriculum,
+      files: localFiles.length === 0,
+    };
+
+    setErrors(newErrors);
+    return !Object.values(newErrors).some((error) => error);
+  };
 
   const handleSubmit = async () => {
+    if (!validateForm()) {
+      return;
+    }
     if (!className || !subject || !curriculum) {
       alert("Please select class, subject, and curriculum");
       return;
     }
 
     if (localFiles.length === 0) {
-      alert("Please upload at least one file");
+      alert("Please upload a file");
       return;
     }
 
@@ -87,12 +129,26 @@ const Teacher = () => {
   const handleReset = () => {
     setLocalFiles([]);
     dispatch(resetUpload());
+    dispatch(clearUploadResults());
   };
   const handleChat = () => {
     router.push(`/chat`);
   };
 
-  const classOptions = ["Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5"];
+  const classOptions = [
+    "Grade 1",
+    "Grade 2",
+    "Grade 3",
+    "Grade 4",
+    "Grade 5",
+    "Grade 6",
+    "Grade 7",
+    "Grade 8",
+    "Grade 9",
+    "Grade 10",
+    "Grade 11",
+    "Grade 12",
+  ];
   const subjectOptions = ["Math", "Science", "History", "English", "Art"];
   const curriculumOptions = ["CBSE", "ICSE", "State Board", "IGCSE"];
 
@@ -140,13 +196,18 @@ const Teacher = () => {
         <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
           <div>
             <label className="block text-sm font-medium mb-2 text-gray-700">
-              Class
+              Class {errors.class && <span className="text-red-600">*</span>}
             </label>
             <div className="relative">
               <select
                 value={className || ""}
-                onChange={(e) => dispatch(setClass(e.target.value))}
-                className="w-full text-black pl-10 pr-4 py-3 bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none"
+                onChange={(e) => {
+                  dispatch(setClass(e.target.value));
+                  if (errors.class) setErrors({ ...errors, class: false });
+                }}
+                className={`w-full text-black pl-10 pr-4 py-3 bg-gray-50 border ${
+                  errors.class ? "border-red-500" : "border-gray-200"
+                } rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none`}
               >
                 <option value="">Select Class</option>
                 {classOptions.map((option) => (
@@ -162,17 +223,26 @@ const Teacher = () => {
                 <ChevronDown className="h-4 w-4 text-gray-400" />
               </div>
             </div>
+            {errors.class && (
+              <p className="mt-1 text-sm text-red-600">Please select a class</p>
+            )}
           </div>
 
           <div>
             <label className="block text-sm font-medium mb-2 text-gray-700">
-              Subject
+              Subject{" "}
+              {errors.subject && <span className="text-red-600">*</span>}
             </label>
             <div className="relative">
               <select
                 value={subject || ""}
-                onChange={(e) => dispatch(setSubject(e.target.value))}
-                className="w-full text-black pl-10 pr-4 py-3 bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none"
+                onChange={(e) => {
+                  dispatch(setSubject(e.target.value));
+                  if (errors.subject) setErrors({ ...errors, subject: false });
+                }}
+                className={`w-full text-black pl-10 pr-4 py-3 bg-gray-50 border ${
+                  errors.subject ? "border-red-500" : "border-gray-200"
+                } rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none`}
               >
                 <option value="">Select Subject</option>
                 {subjectOptions.map((option) => (
@@ -188,17 +258,29 @@ const Teacher = () => {
                 <ChevronDown className="h-4 w-4 text-gray-400" />
               </div>
             </div>
+            {errors.subject && (
+              <p className="mt-1 text-sm text-red-600">
+                Please select a subject
+              </p>
+            )}
           </div>
 
           <div>
             <label className="block text-sm font-medium mb-2 text-gray-700">
-              Curriculum
+              Curriculum{" "}
+              {errors.curriculum && <span className="text-red-600">*</span>}
             </label>
             <div className="relative">
               <select
                 value={curriculum || ""}
-                onChange={(e) => dispatch(setCurriculum(e.target.value))}
-                className="w-full text-black pl-10 pr-4 py-3 bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none"
+                onChange={(e) => {
+                  dispatch(setCurriculum(e.target.value));
+                  if (errors.curriculum)
+                    setErrors({ ...errors, curriculum: false });
+                }}
+                className={`w-full text-black pl-10 pr-4 py-3 bg-gray-50 border ${
+                  errors.curriculum ? "border-red-500" : "border-gray-200"
+                } rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none`}
               >
                 <option value="">Select Curriculum</option>
                 {curriculumOptions.map((option) => (
@@ -214,6 +296,11 @@ const Teacher = () => {
                 <ChevronDown className="h-4 w-4 text-gray-400" />
               </div>
             </div>
+            {errors.curriculum && (
+              <p className="mt-1 text-sm text-red-600">
+                Please select a curriculum
+              </p>
+            )}
           </div>
         </div>
       </motion.div>
@@ -228,11 +315,13 @@ const Teacher = () => {
         <div
           {...getRootProps()}
           className={`rounded-2xl p-8 text-center cursor-pointer transition-all duration-300
-            ${
-              isDragActive
-                ? "border-2 border-dashed border-blue-500 bg-blue-50 shadow-lg"
-                : "border-2 border-dashed border-gray-300 hover:border-blue-400 bg-white hover:bg-blue-50 shadow-sm"
-            }`}
+           ${
+             isDragActive
+               ? "border-2 border-dashed border-blue-500 bg-blue-50 shadow-lg"
+               : `border-2 border-dashed ${
+                   errors.files ? "border-red-500" : "border-gray-300"
+                 } hover:border-blue-400 bg-white hover:bg-blue-50 shadow-sm`
+           }`}
         >
           <input {...getInputProps()} />
           <motion.div
@@ -254,11 +343,29 @@ const Teacher = () => {
               from your device
             </p>
             <p className="text-sm text-gray-400 mt-3">
-              Supports PDF, PPT, JPG, PNG (max 10MB each)
+              Supports PDF, PPT, JPG, PNG (max 10MB, single file)
             </p>
           </motion.div>
         </div>
       </motion.div>
+
+      {fileErrors.length > 0 && (
+        <motion.div
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="mb-4 bg-red-50 border border-red-200 rounded-lg p-4"
+        >
+          <h3 className="font-medium text-red-800 mb-2">File Upload Errors</h3>
+          <ul className="space-y-1">
+            {fileErrors.map((error, index) => (
+              <li key={index} className="text-sm text-red-700 flex">
+                <span className="font-medium mr-1">{error.fileName}:</span>
+                <span>{error.error}</span>
+              </li>
+            ))}
+          </ul>
+        </motion.div>
+      )}
 
       {/* Uploaded Files Preview */}
       <AnimatePresence>
@@ -271,45 +378,57 @@ const Teacher = () => {
           >
             <div className="flex items-center mb-4">
               <h2 className="text-xl font-semibold text-gray-800">
-                Selected Files
+                Selected File
               </h2>
               <span className="ml-2 bg-blue-100 text-blue-800 text-xs font-medium px-2.5 py-0.5 rounded-full">
                 {localFiles.length}
               </span>
             </div>
             <div className="space-y-3">
-              {localFiles.map((file) => (
-                <motion.div
-                  key={file.name}
-                  initial={{ opacity: 0, x: -20 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0, x: 20 }}
-                  className="flex items-center justify-between p-4 bg-white rounded-lg border border-gray-100 shadow-sm hover:shadow transition-shadow"
-                >
-                  <div className="flex items-center">
-                    <div className="p-2 bg-blue-50 rounded-lg mr-3">
-                      {getFileIcon(file.name)}
-                    </div>
-                    <div>
-                      <p className="text-black font-medium truncate max-w-xs">
-                        {file.name}
-                      </p>
-                      <p className="text-gray-500 text-sm">
-                        {(file.size / 1024 / 1024).toFixed(2)}MB
-                      </p>
-                    </div>
-                  </div>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleRemoveFile(file.name);
-                    }}
-                    className="p-2 rounded-full hover:bg-gray-100 text-gray-500 hover:text-red-500 transition-colors"
+              {localFiles.map((file) => {
+                const fileError = fileErrors.find(
+                  (e) => e.fileName === file.name
+                );
+                return (
+                  <motion.div
+                    key={file.name}
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: 20 }}
+                    className={`flex items-center justify-between p-4 bg-white rounded-lg border ${
+                      fileError ? "border-red-200 bg-red-50" : "border-gray-100"
+                    } shadow-sm hover:shadow transition-shadow`}
                   >
-                    <X className="h-5 w-5" />
-                  </button>
-                </motion.div>
-              ))}
+                    <div className="flex items-center">
+                      <div className="p-2 bg-blue-50 rounded-lg mr-3">
+                        {getFileIcon(file.name)}
+                      </div>
+                      <div>
+                        <p className="text-black font-medium truncate max-w-xs">
+                          {file.name}
+                        </p>
+                        <p className="text-gray-500 text-sm">
+                          {(file.size / 1024 / 1024).toFixed(2)}MB
+                        </p>
+                        {fileError && (
+                          <p className="text-red-500 text-xs mt-1">
+                            {fileError.error}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleRemoveFile();
+                      }}
+                      className="p-2 rounded-full hover:bg-gray-100 text-gray-500 hover:text-red-500 transition-colors"
+                    >
+                      <X className="h-5 w-5" />
+                    </button>
+                  </motion.div>
+                );
+              })}
             </div>
           </motion.div>
         )}
@@ -368,55 +487,89 @@ const Teacher = () => {
       )}
 
       <AnimatePresence>
-        {Object.keys(ocrResults).length > 0 && (
+        {Object.keys(uploadResults).length > 0 && (
           <motion.div
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
             exit={{ opacity: 0, height: 0 }}
             className="mb-8 bg-white rounded-xl shadow-lg border border-gray-100 overflow-hidden"
           >
-            <div className="flex justify-between items-center p-6 border-b border-gray-100">
+            <div className="p-6 border-b border-gray-100">
               <h2 className="text-xl font-semibold text-gray-800">
-                OCR Results
+                Upload Results
               </h2>
-              <Button
-                variant="outline"
-                onClick={() => setShowResults(!showResults)}
-                className="flex items-center gap-2"
-              >
-                {showResults ? "Hide Results" : "Show Results"}
-                <ChevronDown
-                  className={`h-4 w-4 transition-transform ${
-                    showResults ? "rotate-180" : ""
-                  }`}
-                />
-              </Button>
             </div>
 
-            {showResults && (
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="p-6 bg-gray-50"
-              >
-                <div className="space-y-5">
-                  {Object.entries(ocrResults).map(([fileName, text]) => (
-                    <div
-                      key={fileName}
-                      className="p-4 bg-white rounded-lg border border-gray-200 shadow-sm"
-                    >
-                      <h3 className="font-medium mb-3 text-gray-700 flex items-center gap-2">
-                        <FileText className="h-4 w-4 text-blue-500" />
-                        {fileName}
-                      </h3>
-                      <div className="p-4 bg-gray-900 text-gray-100 rounded-md max-h-60 overflow-y-auto font-mono text-sm">
-                        {text || "No text detected"}
+            <div className="p-6 bg-gray-50">
+              <div className="space-y-4">
+                {Object.entries(uploadResults).map(([fileName, result]) => (
+                  <div
+                    key={fileName}
+                    className={`p-4 rounded-lg border ${
+                      result.status === "success"
+                        ? "bg-green-50 border-green-200"
+                        : result.status === "duplicate"
+                        ? "bg-yellow-50 border-yellow-200"
+                        : "bg-red-50 border-red-200"
+                    }`}
+                  >
+                    <div className="flex items-start">
+                      {result.status === "success" ? (
+                        <CheckCircle className="h-5 w-5 text-green-500 mt-0.5 mr-2 flex-shrink-0" />
+                      ) : result.status === "duplicate" ? (
+                        <AlertCircle className="h-5 w-5 text-yellow-500 mt-0.5 mr-2 flex-shrink-0" />
+                      ) : (
+                        <XCircle className="h-5 w-5 text-red-500 mt-0.5 mr-2 flex-shrink-0" />
+                      )}
+                      <div>
+                        <div className="flex items-center">
+                          <h3 className="font-medium text-gray-800">
+                            {fileName}
+                          </h3>
+                          <span
+                            className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium ${
+                              result.status === "success"
+                                ? "bg-green-100 text-green-800"
+                                : result.status === "duplicate"
+                                ? "bg-yellow-100 text-yellow-800"
+                                : "bg-red-100 text-red-800"
+                            }`}
+                          >
+                            {result.status}
+                          </span>
+                        </div>
+                        <p className="mt-1 text-gray-700">{result.message}</p>
+
+                        {/* Show additional details based on status */}
+                        {result.status === "duplicate" &&
+                          result.existing_id && (
+                            <div className="mt-2 text-sm">
+                              <p className="text-gray-600">
+                                Existing ID:
+                                <code className="bg-gray-100 px-1.5 py-0.5 rounded">
+                                  {result.existing_id}
+                                </code>
+                              </p>
+                            </div>
+                          )}
+
+                        {/* {result.status === "success" && (
+                          <div className="mt-2 text-sm">
+                            <p className="text-gray-600">
+                              Chunk Count: {result.chunk_count || "N/A"}
+                            </p>
+                            <p className="text-gray-600">
+                              Namespace: {result.namespace || "N/A"}
+                            </p>
+ 
+                          </div>
+                        )} */}
                       </div>
                     </div>
-                  ))}
-                </div>
-              </motion.div>
-            )}
+                  </div>
+                ))}
+              </div>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>

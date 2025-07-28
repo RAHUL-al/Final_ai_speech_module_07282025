@@ -10,6 +10,17 @@ interface UploadState {
   error: string | null;
   ocrResults: { [fileName: string]: string };
   progress: number;
+  uploadResults: {
+    [fileName: string]: {
+      status: string;
+      message: string;
+      data?: any;
+      filename?: string;
+      chunk_count?: number;
+      namespace?: string;
+      existing_id?: string;
+    };
+  };
 }
 
 const initialState: UploadState = {
@@ -20,6 +31,7 @@ const initialState: UploadState = {
   error: null,
   ocrResults: {},
   progress: 0,
+  uploadResults: {},
 };
 
 export const processFiles = createAsyncThunk(
@@ -31,6 +43,7 @@ export const processFiles = createAsyncThunk(
       const { class: className, subject, curriculum } = state.teacher;
 
       const results: { [fileName: string]: string } = {};
+      const uploadResults: UploadState["uploadResults"] = {};
 
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
@@ -47,9 +60,14 @@ export const processFiles = createAsyncThunk(
         const response = await apiPost("/upload/", formData);
 
         results[file.name] = response.data?.extracted_text || "No text";
+        uploadResults[file.name] = {
+          status: response.status || "unknown",
+          message: response.message || "No message",
+          data: response.namespace,
+        };
       }
 
-      return { results };
+      return { results, uploadResults };
     } catch (error: unknown) {
       console.error("Upload error:", error);
       let errorMessage = "Processing failed";
@@ -84,6 +102,9 @@ const teacherSlice = createSlice({
     setProgress: (state, action: PayloadAction<number>) => {
       state.progress = action.payload;
     },
+    clearUploadResults: (state) => {
+      state.uploadResults = {};
+    },
   },
   extraReducers: (builder) => {
     builder
@@ -91,10 +112,12 @@ const teacherSlice = createSlice({
         state.isLoading = true;
         state.error = null;
         state.progress = 0;
+        state.uploadResults = {};
       })
       .addCase(processFiles.fulfilled, (state, action) => {
         state.isLoading = false;
         state.ocrResults = action.payload.results;
+        state.uploadResults = action.payload.uploadResults;
         state.progress = 100;
       })
       .addCase(processFiles.rejected, (state, action) => {
@@ -105,8 +128,14 @@ const teacherSlice = createSlice({
   },
 });
 
-export const { setClass, setSubject, setCurriculum, resetUpload, setProgress } =
-  teacherSlice.actions;
+export const {
+  setClass,
+  setSubject,
+  setCurriculum,
+  resetUpload,
+  setProgress,
+  clearUploadResults,
+} = teacherSlice.actions;
 
 export default teacherSlice.reducer;
 // function dispatch(arg0: { payload: number; type: "teacher/setProgress" }) {
