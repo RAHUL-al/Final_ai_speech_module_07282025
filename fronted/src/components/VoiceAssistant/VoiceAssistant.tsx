@@ -590,7 +590,8 @@ export default function VoiceAssistant() {
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                Class {errors.class && <span className="text-red-600">*</span>}
+                Class <span className="text-red-600">*</span>
+                {/* Class {errors.class && <span className="text-red-600">*</span>} */}
               </label>
               <select
                 value={classOption}
@@ -618,8 +619,8 @@ export default function VoiceAssistant() {
             {/* Accent Dropdown */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                Accent{" "}
-                {errors.accent && <span className="text-red-600">*</span>}
+                Accent <span className="text-red-600">*</span>
+                {/* {errors.accent && <span className="text-red-600">*</span>} */}
               </label>
               <select
                 value={accentOption}
@@ -647,7 +648,8 @@ export default function VoiceAssistant() {
             {/* Topic Input */}
             <div className="col-span-2">
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                Topic {errors.topic && <span className="text-red-600">*</span>}
+                Topic <span className="text-red-600">*</span>
+                {/* Topic {errors.topic && <span className="text-red-600">*</span>} */}
               </label>
               <input
                 type="text"
@@ -670,7 +672,8 @@ export default function VoiceAssistant() {
 
             <div className="col-span-2">
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                Mood {errors.mood && <span className="text-red-600">*</span>}
+                Mood <span className="text-red-600">*</span>
+                {/* Mood {errors.mood && <span className="text-red-600">*</span>} */}
               </label>
               <select
                 value={moodOption}
@@ -713,14 +716,27 @@ export default function VoiceAssistant() {
               <div className="relative z-10">
                 <div className="w-32 h-32 rounded-full bg-white shadow-lg flex items-center justify-center">
                   <motion.button
-                    onClick={status === "idle" ? initWebRTC : stopAssistant}
+                    onClick={
+                      status === "idle"
+                        ? initWebRTC
+                        : status !== "playing"
+                        ? stopAssistant
+                        : undefined
+                    }
                     className={`w-20 h-20 rounded-full flex items-center justify-center focus:outline-none ${
                       status === "idle"
                         ? "bg-indigo-100 hover:bg-indigo-200 text-indigo-600"
+                        : status === "playing"
+                        ? "bg-gray-400 text-white cursor-not-allowed" // Disabled style
                         : "bg-red-500 hover:bg-red-600 text-white"
                     }`}
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
+                    whileHover={
+                      status !== "playing" ? { scale: 1.05 } : undefined // Disable hover animation
+                    }
+                    whileTap={
+                      status !== "playing" ? { scale: 0.95 } : undefined // Disable tap animation
+                    }
+                    disabled={status === "playing"} // Actually disable the button
                   >
                     {status === "idle" ? (
                       <svg

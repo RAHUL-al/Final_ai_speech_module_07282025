@@ -177,6 +177,12 @@ mail_conf = ConnectionConfig(
     VALIDATE_CERTS=True
 )
 
+
+
+
+
+
+
 async def validate_reset_token(token: str):
     try:
         token_data = redis_client.get(f"session:{token}")
@@ -207,6 +213,19 @@ def generate_reset_token(user_id: str):
         "type": "password_reset"
     }
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+
+async def send_reset_email(email: str, token: str, background_tasks: BackgroundTasks):
+    reset_link = f"https://llm.edusmartai.com/reset-password?token={token}"
+    message = MessageSchema(
+        subject="Reset Your Password",
+        recipients=[email],
+        body=f"Click the link to reset your password: {reset_link}",
+        subtype="plain"
+    )
+    fm = FastMail(mail_conf)
+    background_tasks.add_task(fm.send_message, message)
 
 
 @app.post("/forgot-password")
@@ -275,39 +294,43 @@ async def validate_reset_token_endpoint(token: str):
         )
 
 
-
 @app.post("/reset-password")
 async def reset_password(request: PasswordResetRequest = Body(...)):
     try:
-        # Validate token structure first
-        payload = await validate_reset_token(request.token)
-        user_id = payload["sub"]
-        
-        # Check Redis for additional validation
-        token_data_raw = redis_client.get(f"reset_token:{request.token}")
+        # Validate token and get user data
+        token_data_raw = redis_client.get(f"session:{request.token}")
         if not token_data_raw:
             raise HTTPException(status_code=400, detail="Invalid or expired token")
-            
+
+        logging.info(f"token data {token_data_raw}")
+
+        token_data = json.loads(token_data_raw)  # ✅ Convert string to dict
+        user_id = token_data["user_id"]
+
+        # Check if user exists
+        user_ref = db.collection("users").document(user_id)
+        user_doc = user_ref.get()
+        if not user_doc.exists:
+            raise HTTPException(404, "User not found")
+
         # Update password
-        db.collection("users").document(user_id).update({
+        user_ref.update({
             "password": hash_password(request.new_password),
             "updated_at": datetime.now(timezone.utc)
         })
-        
-        # Delete the used token
-        redis_client.delete(f"reset_token:{request.token}")
-        
+
+        # Delete used token
+        redis_client.delete(f"session:{request.token}")
+
         logging.info(f"Password reset successful for user {user_id}")
         return {"detail": "Password has been reset successfully"}
-        
+
     except HTTPException as he:
         raise he
     except Exception as e:
-        logging.error(f"Error resetting password: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred while resetting your password"
-        )
+        logging.error(f"Reset password error: {str(e)}", exc_info=True)
+        raise HTTPException(500, "Failed to reset password")
+
 
 
 @app.post("/login", response_model=Token)
@@ -889,49 +912,6 @@ def store_in_vector_db(chunks: List[str], metadatas: List[Dict], namespace: str)
 
 
 
-async def store_vectors_async(chunks, metadatas, namespace):
-    """Background task for storing vectors with error handling"""
-    try:
-        vectorstore = PineconeVectorStore.from_existing_index(
-            index_name=PINECONE_INDEX_NAME,
-            embedding=embedding_model,
-            text_key="text",
-            namespace=namespace
-        )
-        
-        # Process embeddings in batches
-        batch_size = 100
-        for i in range(0, len(chunks), batch_size):
-            batch_chunks = chunks[i:i + batch_size]
-            
-            # Generate embeddings for the batch
-            embeddings = await run_in_threadpool(
-                embedding_model.embed_documents,
-                batch_chunks
-            )
-            
-            # Prepare records for this batch
-            batch_metadatas = metadatas[i:i + batch_size]
-            records = zip(
-                [md["chunk_id"] for md in batch_metadatas],
-                embeddings,
-                batch_metadatas
-            )
-            
-            # Upsert the batch
-            try:
-                await run_in_threadpool(
-                    vectorstore._index.upsert,
-                    vectors=list(records)
-                )
-                logging.info(f"Upserted batch {i//batch_size + 1}")
-            except Exception as e:
-                logging.error(f"Failed to upsert batch {i//batch_size + 1}: {str(e)}")
-                # Continue with next batch even if one fails
-                
-    except Exception as e:
-        logging.error(f"Vector storage failed: {str(e)}", exc_info=True)
-
 
 
 @app.post("/chat/")
@@ -1095,7 +1075,7 @@ TEMP_DIR = os.path.abspath("temp_chunks")
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 @app.websocket("/ws/assistant")
-async def audio_ws(websocket: WebSocket):
+async def audio_ws_assistant(websocket: WebSocket):
     await websocket.accept()
     query_params = parse_qs(websocket.url.query)
     username = query_params.get("username", [None])[0]
