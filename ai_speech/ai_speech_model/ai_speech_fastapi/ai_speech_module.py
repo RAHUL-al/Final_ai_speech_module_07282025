@@ -205,7 +205,7 @@ class Topic:
         return prob
     
 
-    async def overall_scoring_by_id(self, essay_id: str):
+    async def overall_scoring_by_listening_module(self, essay_id: str):
         try:
             essay_doc = db.collection("essays").document(essay_id).get()
             if not essay_doc.exists:
@@ -259,23 +259,125 @@ class Topic:
                 \"\"\"{spoken_text}\"\"\"
 
                 Based on the above, return an honest but encouraging evaluation in **JSON format** with the following keys:
+                - check factual and conceptual depth and also include that in overall scoring.
+                - Tell the vocabulary error as well in minor points.
                 - before giving final understanding, topic_grip and suggestions plese look on all the score of pronunciation, grammar, fluency, emotion. Here are you get the score is out of 10.
-                - "understanding": Describe how well the spoken text reflects understanding of the reference essay.
+                - "understanding": Describe how well the spoken text reflects understanding of the reference essay and also tell that according to scoring in {grammar},{fluency},{pronunciation}, what is good or what is need to improve correct word, correct sentence with incorrect sentence spoken give example.
                 - "topic_grip": Comment on how well the speaker stayed on topic and conveyed key points.
-                - "suggestions": A list of 3 teacher-style suggestions to improve the student's speaking and comprehension.
-                - And also suggest some suggestion with example where is the problem in the speech text and what are you need to speak give 1-5 examples in suggestions.
-
+                - "suggestions": A list of 3-5 teacher-style suggestions to improve the student's speaking and comprehension, like where need to imporve in grammar spoken sentence, for fluency and pronounciation and tell that all things in details wth explanation.
+                - "feedback": give feedback in details of overall things in details in points.
+                - And also suggest some give some example with key examples where is the problem in the speech text and what are you need to speak give 3-5 examples in suggestions.
+                - give me all things in details
                 'blocklist': [
                     'you', 'thank you', 'tchau', 'thanks', 'ok', 'Obrigado.', 'E aí', '',
                     'me', 'hello', 'hi', 'hey', 'okay', 'thanks', 'thank', 'obrigado',
                     'tchau.', 'bye', 'goodbye', 'me.', 'you.', 'thank you.'
-                ],
 
                 Important:
                 - You got some data of list blocklist, then you need to concentrate on some word found from blocklist then try to understand it is worked as a raw sentence or make a little meaning because here this content is coming from database which is speak by user then used it else did not take word means filter that from existing content.
                 - Do not include invalid, missing, or placeholder values in the response.
                 - Do not talk about improving the AI itself; focus on guiding a human student.
                 - Keep the tone supportive and constructive, like a real teacher giving oral feedback.
+
+            """
+
+            summary_response = await self.topic_data_model_for_Qwen(username, prompt)
+
+            try:
+                result = json.loads(str(summary_response))
+            except Exception as e:
+                logger.warning(f"Could not parse JSON: {e}")
+                result = {"raw_response": str(summary_response)}
+
+            result.update({
+                "pronunciation": pronunciation,
+                "grammar": grammar,
+                "fluency": fluency,
+                "emotion": emotion
+            })
+
+            return result
+
+        except Exception as e:
+            logger.exception(f"[ERROR] overall_scoring_by_id failed: {e}")
+            return {"error": "Internal Server Error"}
+        
+            
+    async def overall_scoring_by_speech_module(self, essay_id: str):
+        try:
+            essay_doc = db.collection("essays").document(essay_id).get()
+            if not essay_doc.exists:
+                return {"error": f"No essay found with id {essay_id}"}
+
+            essay_data = essay_doc.to_dict()
+            chat_history = essay_data.get("chat_history", "")
+            username = essay_data.get("username")
+            if not username:
+                return {"error": "Username missing in essay data"}
+
+            chunks = essay_data.get("chunks", [])
+            if not chunks:
+                return {"error": "No audio chunks available for this essay. Please ensure audio recording was completed."}
+
+            avg_scores = essay_data.get("average_scores", {})
+            pronunciation = avg_scores.get("pronunciation")
+            fluency = avg_scores.get("fluency")
+            emotion = avg_scores.get("emotion")
+
+            if pronunciation is None or fluency is None or not emotion:
+                fluency_scores = [float(c.get("fluency", 0)) for c in chunks if c.get("fluency") is not None]
+                pronunciation_scores = [float(c.get("pronunciation", 0)) for c in chunks if c.get("pronunciation") is not None]
+                emotion_counts = {}
+                for c in chunks:
+                    em = c.get("emotion")
+                    if em:
+                        emotion_counts[em] = emotion_counts.get(em, 0) + 1
+
+                pronunciation = round(sum(pronunciation_scores) / len(pronunciation_scores), 2) if pronunciation_scores else "[ERROR]"
+                fluency = round(sum(fluency_scores) / len(fluency_scores), 2) if fluency_scores else "[ERROR]"
+                emotion = max(emotion_counts.items(), key=lambda x: x[1])[0] if emotion_counts else "[ERROR]"
+            
+
+            spoken_text = essay_data["transcript"]
+            grammar = await self.grammar_checking(spoken_text)
+
+            prompt = f"""
+                You are an AI English teacher evaluating a student's spoken response based on their performance. You will be provided with the student's spoken text and a reference essay.
+
+                Here are the available scores (only use the ones that are valid and available, ignore or skip any missing or erroneous ones like '[ERROR]' or None):
+                - Pronunciation: {pronunciation}
+                - Grammar: {grammar}
+                - Fluency: {fluency}
+                - Emotion: {emotion}
+
+                Chat_history:
+                \"\"\"{chat_history}\"\"\"
+
+                Rule:-
+                - In chat history are you getting three things SystemMessage, AImessage, HumanMessage
+
+                Based on the above, return an honest but encouraging evaluation in **JSON format** with the following keys:
+                - check factual and conceptual depth and also include that in overall scoring.
+                - Tell the vocabulary error as well in minor points.
+                - before giving final understanding, topic_grip and suggestions plese look on all the score of pronunciation, grammar, fluency, emotion. Here are you get the score is out of 10.
+                - Always concentrate on HumanMessage and AIMessage their communication is matching or not if not matching then also tell about that in understanding.
+                - "understanding": Describe how well the HumanMessage text reflects understanding of the reference topic and also tell that according to scoring in {grammar},{fluency},{pronunciation}, what is good or what is need to improve correct word, correct sentence with incorrect sentence spoken give example.
+                - "topic_grip": Comment on how well the speaker stayed on topic and conveyed key points.
+                - "suggestions": A list of 3-5 teacher-style suggestions to improve the student's speaking and comprehension, like where need to imporve in grammar spoken sentence, for fluency and pronounciation and tell that all things in details.
+                - "feedback": give feedback in details of overall things in details in points.
+                - And also suggest some suggestion with example where is the problem in the HumanMessage text and what are you need to speak give 3-5 examples in suggestions.
+                - I want all things in details
+                'blocklist': [
+                    'you', 'thank you', 'tchau', 'thanks', 'ok', 'Obrigado.', 'E aí', '',
+                    'me', 'hello', 'hi', 'hey', 'okay', 'thanks', 'thank', 'obrigado',
+                    'tchau.', 'bye', 'goodbye', 'me.', 'you.', 'thank you.'
+
+                Important:
+                - You got some data of list blocklist, then you need to concentrate on some word found from blocklist then try to understand it is worked as a raw sentence or make a little meaning because here this content is coming from database which is speak by user then used it else did not take word means filter that from existing content.
+                - Do not include invalid, missing, or placeholder values in the response.
+                - Do not talk about improving the AI itself; focus on guiding a human student.
+                - Keep the tone supportive and constructive, like a real teacher giving oral feedback.
+
             """
 
             summary_response = await self.topic_data_model_for_Qwen(username, prompt)
