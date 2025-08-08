@@ -1,6 +1,6 @@
 from datetime import timezone
 from google.cloud.firestore_v1.base_query import FieldFilter
-from schemas import UserCreate, PasswordResetRequest, ForgotPasswordRequest, UserOut, UserUpdate, Token, LoginRequest, ForgotPasswordRequest, GeminiRequest, ChatRequest
+from schemas import UserCreate, PasswordResetRequest, ForgotPasswordRequest, UserOut, UserUpdate, Token, LoginRequest, ForgotPasswordRequest, GeminiRequest, ChatRequest, UploadRequest
 from fastapi import Body
 from fastapi.websockets import WebSocketState
 import asyncio
@@ -37,7 +37,6 @@ import logging
 from urllib.parse import parse_qs,unquote
 from jose import JWTError, jwt
 from ai_speech_module import Topic
-from schemas import UserCreate, UserOut, UserUpdate, Token, LoginRequest, ForgotPasswordRequest, GeminiRequest, ChatRequest
 from langchain_ollama import OllamaLLM
 import re
 from typing import List
@@ -76,7 +75,6 @@ import logging
 from datetime import datetime
 from urllib.parse import parse_qs
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks
-import os
 import shutil
 import time
 import logging
@@ -89,11 +87,28 @@ import docx2txt
 from pptx import Presentation
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import google.generativeai as genai
-import torch
-from fastapi import WebSocket, WebSocketDisconnect
-from pydub import AudioSegment
-import aiohttp
+import subprocess
+import json
+from pdf2image import convert_from_path
+import os
+from fastapi import HTTPException
+from pathlib import Path
+import os
+from typing import List, Optional
+from PIL import Image
+import base64
+from io import BytesIO
+from typing import List, TypedDict, Annotated
+import os
+import glob
+import logging
+import json
+from datetime import datetime
+from langchain.chains import LLMChain
+
+python311_path = "/home/ubuntu/ai_speech/venv/bin/python"
+script_path = "/home/ubuntu/ai_speech/ai_speech_model/ai_speech_fastapi/layoutparser_file.py"
+
 
 CPU_API_BASE = "http://13.200.201.10:8000"
 model_name = OllamaLLM(model="mistral")
@@ -157,14 +172,9 @@ def register(user: UserCreate):
 from fastapi.concurrency import run_in_threadpool
 from fastapi import BackgroundTasks
 from fastapi_mail import FastMail, MessageSchema, ConnectionConfig
-from pydantic import EmailStr
-import secrets
-import string
-from typing import Optional
 
 PASSWORD_RESET_TOKEN_EXPIRE_HOURS = 1
 
-# Email Configuration
 mail_conf = ConnectionConfig(
     MAIL_USERNAME=os.getenv("MAIL_USERNAME", "testampli2023@gmail.com"),
     MAIL_PASSWORD=os.getenv("MAIL_PASSWORD", "mulpeeeuolzidejx"),
@@ -176,10 +186,6 @@ mail_conf = ConnectionConfig(
     USE_CREDENTIALS=True,
     VALIDATE_CERTS=True
 )
-
-
-
-
 
 
 
@@ -231,11 +237,9 @@ async def send_reset_email(email: str, token: str, background_tasks: BackgroundT
 @app.post("/forgot-password")
 async def forgot_password(request: ForgotPasswordRequest, background_tasks: BackgroundTasks):
     try:
-        # Validate email format
         if not request.email or "@" not in request.email:
             return {"detail": "If this email exists in our system, you'll receive a password reset link"}
 
-        # Find user in Firestore
         docs = db.collection("users").where(filter=FieldFilter("email", "==", request.email)).stream()
         user_doc = next(docs, None)
 
@@ -243,11 +247,9 @@ async def forgot_password(request: ForgotPasswordRequest, background_tasks: Back
             logging.info(f"Password reset requested for non-existent email: {request.email}")
             return {"detail": "If this email exists in our system, you'll receive a password reset link"}
 
-        # Generate JWT token
         reset_token = generate_reset_token(user_doc.id)
         token_expiry = datetime.now(timezone.utc) + timedelta(hours=PASSWORD_RESET_TOKEN_EXPIRE_HOURS)
 
-        # Store token in Redis (for additional validation if needed)
         redis_client.setex(
             f"reset_token:{reset_token}",
             int(timedelta(hours=PASSWORD_RESET_TOKEN_EXPIRE_HOURS).total_seconds()),
@@ -258,7 +260,6 @@ async def forgot_password(request: ForgotPasswordRequest, background_tasks: Back
             })
         )
 
-        # Send email
         await send_reset_email(request.email, reset_token, background_tasks)
         logging.info(f"Password reset token generated for {request.email}")
 
@@ -297,29 +298,25 @@ async def validate_reset_token_endpoint(token: str):
 @app.post("/reset-password")
 async def reset_password(request: PasswordResetRequest = Body(...)):
     try:
-        # Validate token and get user data
         token_data_raw = redis_client.get(f"session:{request.token}")
         if not token_data_raw:
             raise HTTPException(status_code=400, detail="Invalid or expired token")
 
         logging.info(f"token data {token_data_raw}")
 
-        token_data = json.loads(token_data_raw)  # ✅ Convert string to dict
+        token_data = json.loads(token_data_raw)
         user_id = token_data["user_id"]
 
-        # Check if user exists
         user_ref = db.collection("users").document(user_id)
         user_doc = user_ref.get()
         if not user_doc.exists:
             raise HTTPException(404, "User not found")
 
-        # Update password
         user_ref.update({
             "password": hash_password(request.new_password),
             "updated_at": datetime.now(timezone.utc)
         })
 
-        # Delete used token
         redis_client.delete(f"session:{request.token}")
 
         logging.info(f"Password reset successful for user {user_id}")
@@ -415,17 +412,25 @@ async def generate_prompt(data: GeminiRequest, user=Depends(get_user_from_redis_
 
 
 @app.get("/overall-scoring-by-id")
-async def overall_scoring_by_id(essay_id: str):
+async def overall_scoring_by_listening_module(essay_id: str):
     topic = Topic()
-    result = await topic.overall_scoring_by_id(essay_id)
+    result = await topic.overall_scoring_by_listening_module(essay_id)
     return result
 
 TEMP_DIR = os.path.abspath("audio_folder")
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 
+@app.get("/overall-scoring-by-id-speech-module")
+async def overall_scoring_by_speech_module(essay_id: str):
+    topic = Topic()
+    result = await topic.overall_scoring_by_speech_module(essay_id)
+    return result
 
 
+
+TEMP_DIR = os.path.abspath("audio_folder")
+os.makedirs(TEMP_DIR, exist_ok=True)
 
 @app.websocket("/ws/audio")
 async def audio_ws(websocket: WebSocket):
@@ -438,6 +443,7 @@ async def audio_ws(websocket: WebSocket):
         await websocket.close(code=4001)
         logging.info("Username or token missing.")
         return
+        
 
     logging.info(f"[WS] Authenticated connection from {username}")
     chunk_index = 0
@@ -478,7 +484,6 @@ async def audio_ws(websocket: WebSocket):
                 audio.export(chunk_filename, format="wav")
 
                 async with aiohttp.ClientSession() as session:
-                    # Emotion detection
                     with open(chunk_filename, "rb") as f:
                         form = aiohttp.FormData()
                         form.add_field("file", f, filename=os.path.basename(chunk_filename), content_type="audio/wav")
@@ -486,7 +491,6 @@ async def audio_ws(websocket: WebSocket):
                             emotion_data = await res.json()
                             emotion = emotion_data.get("emotion")
 
-                    # Speech-to-text
                     transcribed_text = await topic.speech_to_text(chunk_filename, username)
 
                     async with session.post(
@@ -496,7 +500,6 @@ async def audio_ws(websocket: WebSocket):
                         fluency_data = await res.json()
                         fluency = fluency_data.get("fluency")
 
-                    # Pronunciation
                     with open(chunk_filename, "rb") as f:
                         form = aiohttp.FormData()
                         form.add_field("file", f, filename=os.path.basename(chunk_filename), content_type="audio/wav")
@@ -504,7 +507,6 @@ async def audio_ws(websocket: WebSocket):
                             pron_data = await res.json()
                             pronunciation = pron_data.get("pronunciation")
 
-                # Silvero remains local
                 silvero = await topic.silvero_vad(chunk_filename)
                 topic.update_realtime_stats(fluency, pronunciation, emotion)
 
@@ -596,8 +598,6 @@ def get_tts_audio(username: str):
 
 
 
-
-
 SUPPORTED_IMAGE_FORMATS = [".png", ".jpg", ".jpeg"]
 SUPPORTED_TEXT_FORMATS = [".txt"]
 SUPPORTED_PDF_FORMATS = [".pdf"]
@@ -635,7 +635,6 @@ async def run_in_threadpool(func, *args, **kwargs):
 
 
 def render_text_to_image(text: str, width=800, font_size=18) -> Image.Image:
-    """Render text content to an image with proper formatting"""
     font = ImageFont.load_default()
     lines = []
     dummy_img = Image.new("RGB", (width, 1000))
@@ -664,7 +663,6 @@ def render_text_to_image(text: str, width=800, font_size=18) -> Image.Image:
     return img
 
 def file_to_images(file_path: str) -> List[Image.Image]:
-    """Convert various file formats to a list of images (pages)"""
     ext = os.path.splitext(file_path)[1].lower()
     images = []
 
@@ -713,71 +711,125 @@ def file_to_images(file_path: str) -> List[Image.Image]:
 
     return images
 
-async def process_single_image(image: Image.Image, idx: int) -> str:
-    """Process a single image/page with Gemini OCR"""
+
+async def process_single_image(filename,username,image: Image.Image, idx: int,image_path) -> str:
     try:
+        today_date = datetime.now().strftime("%Y-%m-%d")
+        base_dir = f"diagrams/{username}_{today_date}?extracted_images"
+        
         response = await run_in_threadpool(
             gemini_model.generate_content,
             [
-                "Extract all the text from this image accurately, including tables and special formatting.",
-                image
+                image,
+                "1. Extract all visible text from this image.\n"
+                "2. If the image contains diagrams, illustrations, or charts, summarize what they represent in 2-3 lines.\n"
+                "Return the result with clear separation: first the text, then the image summary (if any)."
             ]
         )
         text = response.text.strip()
+
+        result = subprocess.run(
+            [python311_path, script_path, username, image_path, str(idx), filename],
+            capture_output=True,
+            text=True
+        )
+        try:
+            output = json.loads(result.stdout)
+            print(f"Page {idx + 1} Output:", output["result"])
+        except json.JSONDecodeError:
+            print(f"Error decoding output for page {idx + 1}:", result.stdout)
+
+        if result.stderr:
+            print(f"Error from script on page {idx + 1}:", result.stderr)
+
         return f"\n\n--- Page/Image {idx + 1} ---\n{text}"
     except Exception as e:
         logging.error(f"OCR failed on image {idx + 1}: {e}")
         return f"\n\n--- Page/Image {idx + 1} FAILED ---"
 
-
-
-
-async def extract_text_parallel(file_path: str, timeout_per_page: int = 120) -> str:
-    """Parallel text extraction that skips timeout pages silently"""
+async def extract_text_parallel(filename,username,file_path: str, timeout_per_page: int = 240) -> str:
     images = await run_in_threadpool(file_to_images, file_path)
     if not images:
         return ""
     
     all_text = ""
     tasks = []
+
+    filename = filename.replace(" ","_")
+    filename = filename.split(".")[0]
+    output_image_dir = f"/home/ubuntu/ai_speech/ai_speech_model/ai_speech_fastapi/temp_images/{username}/{filename}"
+    if os.path.exists(output_image_dir):
+        if os.listdir(output_image_dir):
+            shutil.rmtree(output_image_dir)
+
+    os.makedirs(output_image_dir, exist_ok=True)
+
     
-    # Create tasks for all images
+    
     for idx, image in enumerate(images):
+        image_path = os.path.join(output_image_dir, f"page_{idx + 1}.jpg")
+        image.save(image_path, "JPEG")
         task = asyncio.create_task(
             asyncio.wait_for(
-                process_single_image(image, idx),
+                process_single_image(filename,username,image, idx,image_path),
                 timeout=timeout_per_page
             )
         )
         tasks.append(task)
     
-    # Process results silently
-    for task in asyncio.as_completed(tasks):
+    for i, task in enumerate(asyncio.as_completed(tasks)):
         try:
             page_text = await task
-            if page_text.strip():  # Only add non-empty text
-                all_text += page_text + "\n\n"
-        except (asyncio.TimeoutError, Exception):
-            continue  # Skip failed pages without logging
+            all_text += page_text
+        except asyncio.TimeoutError:
+            logging.warning(f"Timeout processing page {i + 1}")
+            all_text += f"\n\n--- Page/Image {i + 1} TIMEOUT ---"
+        except Exception as e:
+            logging.error(f"Error processing page {i + 1}: {e}")
+            all_text += f"\n\n--- Page/Image {i + 1} ERROR ---"
     
-    return all_text.strip()
+    return all_text
 
-async def extract_text_with_retry(file_path: str, timeout=360, max_retries=3) -> tuple[str, bool]:
-    """OCR extraction with silent error handling"""
-    for attempt in range(1, max_retries + 1):
+async def extract_text_with_retry(filename,username,file_path: str, timeout=240, max_retries=3) -> tuple[str, bool]:
+    last_error = None
+    timeout_occurred = False
+    
+    for attempt in range(1, max_retries + 2):
         try:
             task_start = time.time()
-            task = asyncio.create_task(extract_text_parallel(file_path))
-            result = await asyncio.wait_for(task, timeout=timeout)
-            logging.info(f"OCR completed in {time.time()-task_start:.2f}s")
-            return result, False
-        except asyncio.TimeoutError:
-            if attempt == max_retries:
-                return "", True
-            await asyncio.sleep(min(2 ** attempt, 10))
-        except Exception:
-            await asyncio.sleep(1)
-    return "", True
+            
+            task = asyncio.create_task(extract_text_parallel(filename,username,file_path))
+            
+            try:
+                result = await asyncio.wait_for(task, timeout=timeout)
+                elapsed = time.time() - task_start
+                logging.info(f"OCR succeeded in attempt {attempt} ({elapsed:.2f}s)")
+                return result, timeout_occurred
+                
+            except asyncio.TimeoutError:
+                task.cancel()
+                elapsed = time.time() - task_start
+                logging.warning(
+                    f"OCR timeout in attempt {attempt} after {elapsed:.2f}s "
+                    f"(Timeout setting: {timeout}s)"
+                )
+                last_error = f"Timeout after {timeout}s"
+                timeout_occurred = True
+                
+                if attempt <= max_retries:
+                    backoff = min(2 ** attempt, 10)
+                    await asyncio.sleep(backoff)
+                    
+        except Exception as e:
+            last_error = str(e)
+            logging.error(f"OCR attempt {attempt} failed: {last_error}")
+            if attempt <= max_retries:
+                await asyncio.sleep(1)
+
+    raise HTTPException(
+        status_code=504,
+        detail=f"OCR failed after {max_retries + 1} attempts. Last error: {last_error}"
+    )
 
 @app.post("/upload/")
 async def upload_file(
@@ -785,91 +837,127 @@ async def upload_file(
     file: UploadFile = File(...),
     student_class: str = Form(...),
     subject: str = Form(...),
-    curriculum: str = Form(...)
+    curriculum: str = Form(...),
+    username : str = Form(...),
+    
 ):
-    """Handle file upload with proper async file handling"""
+
     file_path = None
     try:
-        # 1. Async file save
         start_time = time.time()
-        file_path = f"uploads/{curriculum}/{student_class}/{subject}/{file.filename}"
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        
-        # Proper async file writing
-        async with aiofiles.open(file_path, 'wb') as f:
-            while chunk := await file.read(1024 * 1024):  # 1MB chunks
-                await f.write(chunk)
-        
-        # 2. Text extraction
+        folder = f"uploads/{curriculum}/{student_class}/{subject}"
+        os.makedirs(folder, exist_ok=True)
+        file_path = os.path.join(folder, file.filename)
+
+        filename = file.filename
+
+        with open(file_path, "wb") as buffer:
+            while chunk := await file.read(1024 * 1024):
+                buffer.write(chunk)
+        logging.info(f"File saved in {time.time()-start_time:.2f}s")
+
         extract_start = time.time()
-        extracted_text, _ = await extract_text_with_retry(file_path)
+        try:
+            extracted_text, timeout_occurred = await extract_text_with_retry(
+                filename,
+                username,
+                file_path,
+                timeout=240,
+                max_retries=2,
+            )
+            logging.info(f"Text extracted in {time.time()-extract_start:.2f}s")
+            
+            if not extracted_text.strip():
+                raise HTTPException(
+                    status_code=422,
+                    detail="No text could be extracted from the file"
+                )
+                
+        except HTTPException as e:
+            raise e
+        except Exception as e:
+            logging.error(f"OCR processing failed: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to process document content"
+            )
+
+        namespace = f"{curriculum}_{student_class}_{subject}"
         
-        if not extracted_text.strip():
+        existing_entries = index.query(
+            vector=embedding_model.embed_query(extracted_text[:1000]),
+            top_k=1,
+            filter={
+                "filename": {"$eq": file.filename},
+                "type": {"$eq": "document"}
+            },
+            namespace=namespace
+        )
+        
+        if existing_entries.matches:
             return {
-                "status": "success",
-                "message": "Document processed (no text extracted)",
-                "chunk_count": 0
+                "status": "duplicate",
+                "message": "File already exists in vector database",
+                "existing_id": existing_entries.matches[0].id
             }
 
-        # 3. Vector storage preparation
-        namespace = f"{curriculum}_{student_class}_{subject}"
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
-            chunk_overlap=200
+            chunk_overlap=200,
+            length_function=len
         )
         chunks = text_splitter.split_text(extracted_text)
         
-        # 4. Background processing
+        metadatas = [{
+            "curriculum": curriculum,
+            "student_class": student_class,
+            "subject": subject,
+            "filename": file.filename,
+            "type": "document",
+            "chunk_idx": i,
+            "text": chunk[:500]
+        } for i, chunk in enumerate(chunks)]
+
         background_tasks.add_task(
             store_in_vector_db,
             chunks=chunks,
-            metadatas=[{
-                "curriculum": curriculum,
-                "student_class": student_class,
-                "subject": subject,
-                "filename": file.filename,
-                "type": "document",
-                "chunk_idx": i,
-                "text": chunk[:500]
-            } for i, chunk in enumerate(chunks)],
+            metadatas=metadatas,
             namespace=namespace
         )
 
         return {
             "status": "success",
             "filename": file.filename,
-            "message": "File processed successfully",
+            "message": "File processed and queued for vector storage",
             "processing_times": {
                 "file_save": f"{time.time()-start_time:.2f}s",
                 "text_extraction": f"{time.time()-extract_start:.2f}s"
             },
+            "timeout_occurred": timeout_occurred,
             "chunk_count": len(chunks),
             "namespace": namespace
         }
 
+    except HTTPException as e:
+        raise e
     except Exception as e:
-        logging.error(f"Upload error: {str(e)}", exc_info=True)
-        return {
-            "status": "success",  # Still return 200
-            "message": "File processing completed with partial results",
-            "filename": file.filename if file else None
-        }
+        logging.error(f"Upload failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Internal server error during file processing"
+        )
     finally:
         if file_path and os.path.exists(file_path):
             try:
                 os.remove(file_path)
-            except Exception:
-                pass
-
-
-
+                logging.info("Temporary file cleaned up")
+            except Exception as e:
+                logging.warning(f"Failed to delete temp file: {str(e)}")
 
 def store_in_vector_db(chunks: List[str], metadatas: List[Dict], namespace: str):
-    """Store document chunks in vector database (runs in background)"""
     try:
         logging.info(f"Starting vector storage for {len(chunks)} chunks in namespace {namespace}")
         
-        # Initialize vector store
         vectorstore = PineconeVectorStore.from_existing_index(
             index_name=PINECONE_INDEX_NAME,
             embedding=embedding_model,
@@ -877,17 +965,14 @@ def store_in_vector_db(chunks: List[str], metadatas: List[Dict], namespace: str)
             namespace=namespace
         )
         
-        # Generate embeddings and store in batches
-        batch_size = 50  # Pinecone recommends batches of 50-100 vectors
+        batch_size = 50 
         for i in range(0, len(chunks), batch_size):
             batch_chunks = chunks[i:i + batch_size]
             batch_metadatas = metadatas[i:i + batch_size]
             
             try:
-                # Generate embeddings
                 embeddings = embedding_model.embed_documents(batch_chunks)
                 
-                # Prepare records for upsert
                 records = []
                 for j, (chunk, metadata) in enumerate(zip(batch_chunks, batch_metadatas)):
                     record = {
@@ -897,7 +982,6 @@ def store_in_vector_db(chunks: List[str], metadatas: List[Dict], namespace: str)
                     }
                     records.append(record)
                 
-                # Upsert to Pinecone
                 vectorstore._index.upsert(vectors=records, namespace=namespace)
                 logging.info(f"Upserted batch {i//batch_size + 1} with {len(records)} vectors")
                 
@@ -911,18 +995,49 @@ def store_in_vector_db(chunks: List[str], metadatas: List[Dict], namespace: str)
         logging.error(f"Vector storage failed: {str(e)}", exc_info=True)
 
 
+BASE_DIR = Path("/home/ubuntu/ai_speech/ai_speech_model/ai_speech_fastapi")
 
+class ChatResponse(TypedDict):
+    question: str
+    answer: Annotated[str, "Do not include URLs, only the valuable answer."]
+    diagram_urls: Annotated[str, "Provide exactly one relevant diagram URL."]
+    source_documents: str
 
+model_name = OllamaLLM(model="mistral")
 
-@app.post("/chat/")
+def parse_llm_response(response_text: str):
+    """Parse the LLM response which should be in JSON format"""
+    try:
+        start_idx = response_text.find('{')
+        end_idx = response_text.rfind('}') + 1
+        json_str = response_text[start_idx:end_idx]
+        return json.loads(json_str)
+    except (json.JSONDecodeError, ValueError) as e:
+        logging.error(f"Failed to parse LLM response: {e}")
+        return {
+            "question": "",
+            "answer": response_text,
+            "url": ""
+        }
+
+@app.post("/chat/", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     try:
         question = request.question.strip()
         subject = request.subject.strip()
         curriculum = request.curriculum.strip()
-
-        # Create namespace for filtering
-        namespace = f"{curriculum}_{subject}"
+        student_class = request.student_class.strip()
+        username = request.username.strip()
+        namespace = f"{curriculum}_{student_class}_{subject}"
+        today_date = datetime.now().strftime("%Y-%m-%d")
+        base_dir = f"/home/ubuntu/ai_speech/ai_speech_model/ai_speech_fastapi/diagrams/{username}_{today_date}/extracted_images"
+        
+        image_extensions = ['*.png', '*.jpg', '*.jpeg', '*.gif', '*.bmp', '*.tiff']
+        image_files = []
+        for ext in image_extensions:
+            image_files.extend(glob.glob(os.path.join(base_dir, ext)))
+        
+        logging.info(f"This is urls : {image_files}")
 
         vectorstore = PineconeVectorStore.from_existing_index(
             index_name=PINECONE_INDEX_NAME,
@@ -932,65 +1047,196 @@ async def chat(request: ChatRequest):
         )
 
         retriever = vectorstore.as_retriever(search_kwargs={
-            "k": 5,  # Reduced for better performance
+            "k": 5,
             "filter": {
                 "subject": subject,
-                "curriculum": curriculum
+                "curriculum": curriculum,
+                "student_class": student_class,
             }
         })
 
-        prompt_template = PromptTemplate.from_template("""
-        You are an expert educator providing clear, concise answers to students.
-        Extract the most relevant information to answer the question using ONLY the provided context.
+        retrieved_docs = retriever.invoke(question)
+        retrieved_docs_content = " ".join(doc.page_content for doc in retrieved_docs)
 
-        Follow these rules:
-        1. Answer in complete, well-structured sentences.
-        2. Do not mention page numbers or document structure.
-        3. If context doesn't contain any content, say "This information is not in our materials."
-        4. Be factual and avoid speculation.
-        5. Use proper grammar and spelling.
-        6. Keep your answer concise and to the point.
-        7. Do not include '\\n' or '*' in your output.
-        8. Do not include escape characters like \\n, \\, \", \n or any slashes.
-        9. Do not use markdown symbols like '*', '-', '`', or backslashes.
+        prompt_template = PromptTemplate(
+            template="""
+                You are an expert educator providing clear, concise answers to students.
+                Use ONLY the provided context to answer the question.
 
-        Context: {context}
-        Question: {question}
-        Answer:
-        """)
+                Context:
+                {context}
 
-        qa_chain = RetrievalQA.from_chain_type(
-            llm=model_name,
-            chain_type="stuff",
-            retriever=retriever,
-            chain_type_kwargs={"prompt": prompt_template},
-            return_source_documents=True
+                Available Images (use exactly one if relevant):
+                {image_files}
+
+                Rules:
+                - Respond in strict JSON format only
+                - Include exactly one diagram URL if relevant to the question
+                - The answer should not contain any URLs
+                - Image paths must be EXACTLY one of the provided paths
+                - If no image is relevant, use empty string for url
+                - Follow this exact format:
+                {{
+                    "question": "the asked question",
+                    "answer": "your answer without any URLs",
+                    "url": "single relevant image URL from above or empty string"
+                }}
+
+                Question: {question}
+
+                Response:
+            """,
+            input_variables=["question", "image_files", "context"]
         )
 
-        # Corrected: Pass the question directly instead of the chain
-        result = qa_chain.invoke({"query": question})  # Using invoke() instead of run()
+        qa_chain = LLMChain(
+            llm=model_name,
+            prompt=prompt_template
+        )
 
-        return {
+        result = qa_chain.invoke({
             "question": question,
-            "answer": result["result"],
-            "source_documents": [doc.metadata for doc in result["source_documents"]]
-        }
+            "image_files": "\n".join(image_files) if image_files else "No images available",
+            "context": retrieved_docs_content
+        })
+
+
+        parsed_response = parse_llm_response(result["text"])
+        response_url = parsed_response.get("url", "")
+
+        if response_url == "empty string":
+            response_url = response_url
+
+        elif response_url == "empty_string":
+            response_url = response_url
+        
+        elif response_url.startswith("/diagrams"):
+            response_url = response_url
+        
+        elif response_url == "":
+            response_url = response_url
+        else:
+            response_url = f"/diagrams/{username}_{today_date}/extracted_images/{response_url}.png"
+            
+            
+
+        return ChatResponse(
+            question=parsed_response.get("question", question),
+            answer=parsed_response.get("answer", ""),
+            diagram_urls=response_url,
+            source_documents=retrieved_docs_content
+        )
 
     except Exception as e:
         logging.error(f"Chat error: {str(e)}", exc_info=True)
-        return {
-            "question": request.question,
-            "answer": "An error occurred while processing your request.",
-            "error": str(e)
-        }
+        return ChatResponse(
+            question=request.question,
+            answer="An error occurred while processing your request.",
+            diagram_urls="",
+            source_documents="",
+        )
+
+
+
+
+@app.get("/view-image/{full_path:path}")
+def view_image(full_path: str):
+    image_path = (BASE_DIR / full_path.lstrip("/")).resolve()
+
+    # Security check
+    if not str(image_path).startswith(str(BASE_DIR)):
+        raise HTTPException(status_code=400, detail="Invalid file path")
+
+    if not image_path.exists():
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    return FileResponse(image_path)
+
+
+
+
+# @app.post("/chat/")
+# async def chat(request: ChatRequest):
+#     try:
+#         question = request.question.strip()
+#         subject = request.subject.strip()
+#         curriculum = request.curriculum.strip()
+#         student_class = request.student_class.strip()
+#         username = request.username.strip()
+#         namespace = f"{curriculum}_{student_class}_{subject}"
+#         today_date = datetime.now().strftime("%Y-%m-%d")
+#         base_dir = f"diagrams/{username}_{today_date}/extracted_images"
+        
+
+#         vectorstore = PineconeVectorStore.from_existing_index(
+#             index_name=PINECONE_INDEX_NAME,
+#             embedding=embedding_model,
+#             text_key="text",
+#             namespace=namespace
+#         )
+
+#         retriever = vectorstore.as_retriever(search_kwargs={
+#             "k": 5,
+#             "filter": {
+#                 "subject": subject,
+#                 "curriculum": curriculum,
+#                 "student_class":student_class,
+#             }
+#         })
+
+#         retrieved_docs = retriever.invoke(question)
+
+#         for i, doc in enumerate(retrieved_docs, start=1):
+#             print(f"\nDocument {i}:\n{doc.page_content}")
+
+#         prompt_template = PromptTemplate.from_template("""
+#         You are an expert educator providing clear, concise answers to students.
+#         Extract the most relevant information to answer the question using ONLY the provided context.
+
+#         Follow these rules:
+#         1. Answer in complete, well-structured sentences.
+#         2. Do not mention page numbers or document structure.
+#         3. If context doesn't contain any content, say "This information is not in our materials."
+#         4. Be factual and avoid speculation.
+#         5. Use proper grammar and spelling.
+#         6. Keep your answer concise and to the point.
+#         7. Do not include '\\n' or '*' in your output.
+#         8. Do not include escape characters like \\n, \\, \", \n or any slashes.
+#         9. Do not use markdown symbols like '*', '-', '`', or backslashes.
+
+#         Context: {context}
+#         Question: {question}
+#         Answer:
+#         """)
+
+#         qa_chain = RetrievalQA.from_chain_type(
+#             llm=model_name,
+#             chain_type="stuff",
+#             retriever=retriever,
+#             chain_type_kwargs={"prompt": prompt_template},
+#             return_source_documents=True
+#         )
+
+#         result = qa_chain.invoke({"query": question})
+
+#         return {
+#             "question": question,
+#             "answer": result["result"],
+#             "source_documents": [doc.metadata for doc in result["source_documents"]]
+#         }
+
+#     except Exception as e:
+#         logging.error(f"Chat error: {str(e)}", exc_info=True)
+#         return {
+#             "question": request.question,
+#             "answer": "An error occurred while processing your request.",
+#             "error": str(e)
+#         }
 
 
 @app.get("/health")
 def welcome_page():
     return {"Message": "Welcome the ai speech module page."}
-
-
-
 
 chat_history = []
 
@@ -1026,13 +1272,9 @@ async def system_message(topic, mood, student_class, level) -> SystemMessage:
     return result
 
 
-
-
-
 async def initialize_essay_document(username, student_topic, student_class, mood, accent, chat_history):
     """Initialize a new essay document in Firestore"""
     try:
-        # Convert initial chat history to serializable format
         serializable_chat_history = []
         for message in chat_history:
             if isinstance(message, (AIMessage, SystemMessage, HumanMessage)):
@@ -1060,15 +1302,12 @@ async def initialize_essay_document(username, student_topic, student_class, mood
             "average_scores": {}
         }
 
-        # For async Firestore client:
         _, doc_ref = db.collection("essays").add(essay_data)
         return doc_ref.id
         
     except Exception as e:
         logging.error(f"Failed to initialize essay document: {str(e)}", exc_info=True)
         raise
-
-
 
 
 TEMP_DIR = os.path.abspath("temp_chunks")
@@ -1097,16 +1336,13 @@ async def audio_ws_assistant(websocket: WebSocket):
 
     logging.info(f"essay_id : {essay_id}")
     
-    # Send essay_id immediately
     try:
         await websocket.send_json({"action": "essay_initialized", "essay_id": essay_id})
     except Exception as e:
         logging.error(f"Failed to send initial essay_id: {str(e)}")
 
     ai_response = await system_message(student_topic, mood, student_class, accent)
-
     chat_history.append(SystemMessage(content=ai_response))
-
     
     if not username or not token:
         await websocket.close(code=4001)
@@ -1116,15 +1352,17 @@ async def audio_ws_assistant(websocket: WebSocket):
     logging.info(f"[WS] Authenticated connection from {username}")
     
     config = {
-        'silence_threshold': 2.0,
+        'silence_threshold': 3.06,
         'min_utterance_length': 3,
-        'max_chunk_duration': 10.0,
+        'min_speech_duration': 1.5,
+        'silence_dBFS_threshold': -45,
+        'processing_cooldown': 2.0,
         'blocklist': [
             'you', 'thank you', 'tchau', 'thanks', 'ok', 'Obrigado.', 'E aí', '',
             'me', 'hello', 'hi', 'hey', 'okay', 'thanks', 'thank', 'obrigado',
             'tchau.', 'bye', 'goodbye', 'me.', 'you.', 'thank you.',"I'm going to take a picture of the sea","Kansai International Airport",
-	    "Thank you for watching!","1 tbsp of salt",'Teksting av Nicolai Winther',
-
+            "Thank you for watching!","1 tbsp of salt",'Teksting av Nicolai Winther',
+            'ん'
         ],
         'max_repetitions': 2,
         'max_silence': 10.0,
@@ -1132,23 +1370,31 @@ async def audio_ws_assistant(websocket: WebSocket):
     }
 
     session_state = {
-        'silvero_model':True,
-        'audio_buffer': AudioSegment.empty(),  # For accumulating speech chunks
-        'text_buffer': [],  # For accumulating transcribed text
-        'silence_duration': 0.0,
+        'silvero_model': True,
+        'audio_buffer': AudioSegment.empty(),
+        'speech_buffer': AudioSegment.empty(),
+        'text_buffer': [],
         'last_speech_time': time.time(),
         'conversation_active': False,
-        'processing_active': False,  # To prevent overlap
+        'processing_active': False,
+        'assistant_speaking': False,
         'chunk_index': 0,
         'chunk_results': [],
-        'text_output': []
+        'text_output': [],
+        'has_speech': False,
+        'last_processing_time': 0,
+        'consecutive_silence_chunks': 0,
+        'active_speech_duration': 0.0
     }
+    
     topic = Topic()
     session_temp_dir = tempfile.mkdtemp(prefix=f"{username}_", dir=TEMP_DIR)
 
+    session_state["assistant_speaking"] = True
     response_audio = await topic.text_to_speech_assistant(ai_response, username, session_temp_dir)
     sleep_time = await send_audio_response(websocket, response_audio)
-    asyncio.sleep(sleep_time)
+    await asyncio.sleep(sleep_time + 2)
+    session_state["assistant_speaking"] = False
 
     logging.info(f"[Session] Temp dir created at {session_temp_dir}")
     
@@ -1156,7 +1402,6 @@ async def audio_ws_assistant(websocket: WebSocket):
     transcript_path = os.path.join(session_temp_dir, f"{username}_transcript.txt")
 
     try:
-        
         while True:
             message = await websocket.receive()
 
@@ -1165,53 +1410,79 @@ async def audio_ws_assistant(websocket: WebSocket):
                 break
 
             if message["type"] == "websocket.receive" and "bytes" in message:
-                if session_state['processing_active']:
-                    continue
-                    
+                if (session_state['processing_active'] or 
+                    session_state['assistant_speaking'] or
+                    (time.time() - session_state['last_processing_time'] < config['processing_cooldown'])):
+                    continue    
+
                 current_time = time.time()
-                
-                # Add new audio to buffer
                 new_chunk = AudioSegment(
                     data=message["bytes"],
                     sample_width=2,
                     frame_rate=16000,
                     channels=1
                 )
+                
                 session_state['audio_buffer'] += new_chunk
                 
-                # Save temp chunk for VAD
-                chunk_filename = os.path.join(session_temp_dir, f"chunk_temp_{session_state['chunk_index']}.wav")
-                new_chunk.export(chunk_filename, format="wav")
-                session_state['chunk_index'] += 1
+                loudness = new_chunk.dBFS
+                is_silent = loudness < config['silence_dBFS_threshold']
                 
-                vad_result = await topic.silvero_vad(chunk_filename)
-                current_silence = vad_result.get("duration", 0.0)
-                
-                if current_silence > 0.3:
-                    session_state['silence_duration'] = min(
-                        session_state['silence_duration'] + current_silence,
-                        config['max_silence']
-                    )
-                    logging.info(f"[VAD] Silence detected: {current_silence:.2f}s (Total: {session_state['silence_duration']:.2f}s)")
+                if is_silent:
+                    session_state['consecutive_silence_chunks'] += 1
+                    logging.info(f"🟡 Silent chunk detected (loudness: {loudness:.2f} dB)")
                     
-                    if session_state['silence_duration'] >= config['silence_threshold']:
-
-                        await process_buffered_audio(final_output,transcript_path,session_state, websocket, username, session_temp_dir, topic, config,student_topic,student_class,mood,accent,chat_history)
+                    if (session_state['has_speech'] and 
+                        session_state['consecutive_silence_chunks'] * config['chunk_duration'] >= config['silence_threshold'] and
+                        session_state['active_speech_duration'] >= config['min_speech_duration']):
+                        
+                        await process_buffered_audio(
+                            final_output, transcript_path, session_state, 
+                            websocket, username, session_temp_dir, topic, 
+                            config, student_topic, student_class, mood, accent, chat_history
+                        )
+                else:
+                    if current_time - session_state['last_processing_time'] < config['processing_cooldown']:
+                        continue
+                        
+                    session_state['consecutive_silence_chunks'] = 0
+                    session_state['has_speech'] = True
+                    session_state['speech_buffer'] += new_chunk
+                    session_state['active_speech_duration'] += config['chunk_duration']
+                    session_state['last_speech_time'] = current_time
+                    logging.info(f"🔵 Speech chunk detected (loudness: {loudness:.2f} dB), active duration: {session_state['active_speech_duration']:.2f}s")
+                    
+                    chunk_filename = os.path.join(session_temp_dir, f"chunk_temp_{session_state['chunk_index']}.wav")
+                    new_chunk.export(chunk_filename, format="wav")
+                    session_state['chunk_index'] += 1
+                    
+                    vad_result = await topic.silvero_vad(chunk_filename)
+                    current_silence = vad_result.get("duration", 0.0)
+                    
+                    if current_silence > 0.3:
+                        logging.info(f"VAD detected silence gap: {current_silence:.2f}s")
+                        
+                        if (current_silence >= config['silence_threshold'] and 
+                            session_state['active_speech_duration'] >= config['min_speech_duration']):
+                            
+                            await process_buffered_audio(
+                                final_output, transcript_path, session_state, 
+                                websocket, username, session_temp_dir, topic, 
+                                config, student_topic, student_class, mood, accent, chat_history
+                            )
 
     except WebSocketDisconnect:
         logging.warning(f"[WS] {username} disconnected unexpectedly")
     except Exception as e:
         logging.error(f"Unexpected error: {str(e)}", exc_info=True)
     finally:
-        essay_id = finalize_session(session_state, username, session_temp_dir, topic,essay_id,chat_history)
-
+        essay_id = finalize_session(session_state, username, session_temp_dir, topic, essay_id, chat_history)
 
 
 
 def cleanup_temp_files(session_temp_dir, chunk_results):
     """Clean up temporary files from session"""
     try:
-        # Remove individual chunk files
         for chunk in chunk_results:
             try:
                 if os.path.exists(chunk['file_path']):
@@ -1219,7 +1490,6 @@ def cleanup_temp_files(session_temp_dir, chunk_results):
             except Exception as e:
                 logging.warning(f"Failed to delete chunk file {chunk['file_path']}: {e}")
 
-        # Remove the temporary directory if empty
         try:
             if os.path.exists(session_temp_dir):
                 if not os.listdir(session_temp_dir):
@@ -1238,19 +1508,18 @@ async def process_buffered_audio(final_output,transcript_path,session_state, web
         return
         
     session_state['processing_active'] = True
+    # session_state["silvero_model"] = False
     try:
 
 
         buffer_filename = os.path.join(temp_dir, f"buffered_{time.time()}.wav")
         session_state['audio_buffer'].export(buffer_filename, format="wav")
         
-        # Transcribe
         transcribed_text = await topic.speech_to_text(buffer_filename, username)
         logging.info(f"Transcribed: {transcribed_text}")
         session_state['text_buffer'].append(transcribed_text)
         session_state['text_output'].append(transcribed_text)
         
-        # Save combined audio
         final_output = os.path.join(temp_dir, f"{username}_output.wav")
         if os.path.exists(final_output):
             existing_audio = AudioSegment.from_wav(final_output)
@@ -1259,17 +1528,14 @@ async def process_buffered_audio(final_output,transcript_path,session_state, web
             combined_audio = session_state['audio_buffer']
         combined_audio.export(final_output, format="wav")
         
-        # Save transcript
         transcript_path = os.path.join(temp_dir, f"{username}_transcript.txt")
         with open(transcript_path, "w", encoding="utf-8") as f:
             f.write(" ".join(session_state['text_output']).strip())
         
-        # Process only if meaningful speech
         clean_text = transcribed_text.lower().strip()
         if (len(transcribed_text.split()) >= config['min_utterance_length'] and 
             clean_text not in config['blocklist']):
             
-            # Get speech analysis
             async with aiohttp.ClientSession() as session:
 
                 with open(buffer_filename, "rb") as f:
@@ -1286,7 +1552,6 @@ async def process_buffered_audio(final_output,transcript_path,session_state, web
                     fluency_data = await res.json()
                     fluency = fluency_data.get("fluency")
 
-                # Pronunciation
                 with open(buffer_filename, "rb") as f:
                     form = aiohttp.FormData()
                     form.add_field("file", f, filename=os.path.basename(buffer_filename), content_type="audio/wav")
@@ -1313,7 +1578,6 @@ async def process_buffered_audio(final_output,transcript_path,session_state, web
 
         session_state['audio_buffer'] = AudioSegment.empty()
         session_state['text_buffer'] = []
-        session_state['silence_duration'] = 0.0
         session_state['conversation_active'] = True
         
     except Exception as e:
@@ -1334,7 +1598,7 @@ async def scraping(topic: str) -> str:
         async with aiohttp.ClientSession() as session:
             async with session.get(api_endpoint) as response:
                 if response.status == 200:
-                    html = await response.text()  # ✅ FIXED
+                    html = await response.text()
                     soup = BeautifulSoup(html, "html.parser")
                     for tag in soup(["script", "style", "noscript"]):
                         tag.decompose()
@@ -1352,7 +1616,7 @@ async def process_user_utterance(text, emotion, fluency, pronunciation,
                                session_state, chunk_filename, websocket, 
                                username, session_temp_dir, topic,student_topic,student_class,mood,accent,chat_history):
     topic.update_realtime_stats(fluency, pronunciation, emotion)
-    """Process a valid user utterance"""
+
     session_state['text_output'].append(text)
     session_state['chunk_results'].append({
         "chunk_index": session_state['chunk_index'],
@@ -1363,6 +1627,7 @@ async def process_user_utterance(text, emotion, fluency, pronunciation,
         "file_path": chunk_filename
     })
     session_state['chunk_index'] += 1
+    scraped_data = await scraping(topic)
 
     try:
         
@@ -1372,7 +1637,7 @@ async def process_user_utterance(text, emotion, fluency, pronunciation,
             2. Never reveal internal project details
             3. Keep responses under 200 words
             5. if by chance question is much more specific topic is needed and you does not have correct answer then used the function await scraping(your_specific_topic), which help in give updated answer.
-                                         
+            6. If you did not have updated data then always used the {scraped_data}, for update yourself, if by chance is question is for related to udpated data then also you able to send the request on the funtion await scraping(topic_you_want_to_select)                           
             Chat History:
             {chat_history}
             considering history as well before answering the question.
@@ -1410,7 +1675,7 @@ async def process_user_utterance(text, emotion, fluency, pronunciation,
             Would you like me to explain how these systems generally work?
 
             Current response should be:
-            """,input_variables=["question","student_topic","student_class","mood","accent","chat_history"]
+            """,input_variables=["scraped_data","question","student_topic","student_class","mood","accent","chat_history"]
             )
         
         model = ChatOllama(
@@ -1425,6 +1690,7 @@ async def process_user_utterance(text, emotion, fluency, pronunciation,
         chain = prompt_template | model | parser
 
         ai_response = await chain.ainvoke({
+            "scraped_data": scraped_data,
             "student_topic": student_topic,
             "mood": mood,
             "student_class": student_class,
@@ -1449,7 +1715,7 @@ async def process_user_utterance(text, emotion, fluency, pronunciation,
 
         response_audio = await topic.text_to_speech_assistant(ai_response, username, session_temp_dir)
         sleep_time = await send_audio_response(websocket, response_audio)
-        time.sleep(sleep_time)
+        time.sleep(sleep_time + 2)
         session_state["silvero_model"]=True
         print("session state now : ",session_state["silvero_model"])
 
@@ -1460,18 +1726,15 @@ async def process_user_utterance(text, emotion, fluency, pronunciation,
 
 
 
-
 async def send_audio_response(websocket, audio_file):
-    """Send audio file through websocket"""
     try:
         if not os.path.exists(audio_file):
             logging.error(f"Audio file not found: {audio_file}")
-            return 0  # Return default sleep time
+            return 0
             
         audio = AudioSegment.from_wav(audio_file)
         duration_ms = len(audio)
         
-        # Check if websocket is still connected
         if websocket.client_state == WebSocketState.DISCONNECTED:
             logging.warning("WebSocket disconnected before sending audio")
             return 0
@@ -1491,7 +1754,6 @@ async def send_audio_response(websocket, audio_file):
 
 
 async def send_default_response(websocket, username, session_temp_dir, topic):
-    """Send default error response"""
     try:
         default_response = "I didn't quite catch that. Could you please repeat?"
         response_audio = await topic.text_to_speech_assistant(default_response, username, session_temp_dir)
@@ -1500,7 +1762,6 @@ async def send_default_response(websocket, username, session_temp_dir, topic):
         logging.error(f"Failed to send default response: {str(e)}")
 
 async def send_followup(websocket, username, session_temp_dir, topic):
-    """Send follow-up message after silence"""
     try:
         followup = "Is there anything else I can help you with?"
         response_audio = await topic.text_to_speech_assistant(followup, username, session_temp_dir)
@@ -1511,9 +1772,7 @@ async def send_followup(websocket, username, session_temp_dir, topic):
 
 
 def finalize_session(session_state, username, session_temp_dir, topic, essay_id, chat_history):
-    """Update the existing essay document with final data"""
     try:
-        # Convert LangChain message objects to simple dictionaries
         serializable_chat_history = []
         for message in chat_history:
             if isinstance(message, (AIMessage, SystemMessage, HumanMessage)):
@@ -1526,13 +1785,10 @@ def finalize_session(session_state, username, session_temp_dir, topic, essay_id,
                 }
                 serializable_chat_history.append(message_dict)
             elif isinstance(message, dict):
-                # If it's already a dictionary, use as-is
                 serializable_chat_history.append(message)
             else:
-                # Fallback for any other type
                 serializable_chat_history.append(str(message))
 
-        # Prepare chunk results without file paths (as they're temporary)
         chunk_results_clean = []
         for chunk in session_state['chunk_results']:
             clean_chunk = {
@@ -1541,14 +1797,11 @@ def finalize_session(session_state, username, session_temp_dir, topic, essay_id,
                 'emotion': chunk.get('emotion'),
                 'fluency': chunk.get('fluency'),
                 'pronunciation': chunk.get('pronunciation'),
-                # Exclude file_path as it's temporary
             }
             chunk_results_clean.append(clean_chunk)
 
-        # Get Firestore document reference
         essay_ref = db.collection("essays").document(essay_id)
         
-        # Prepare update data
         update_data = {
             "chat_history": serializable_chat_history,
             "chunks": chunk_results_clean,
@@ -1558,16 +1811,14 @@ def finalize_session(session_state, username, session_temp_dir, topic, essay_id,
             "transcript": " ".join(session_state['text_output']).strip()
         }
 
-        # Update document
         essay_ref.update(update_data)
         logging.info(f"Successfully updated essay document {essay_id}")
         
     except Exception as e:
         logging.error(f"Failed to finalize essay document: {str(e)}", exc_info=True)
-        raise  # Re-raise the exception after logging
+        raise
     
     finally:
-        # Cleanup files regardless of whether database update succeeded
         cleanup_temp_files(session_temp_dir, session_state['chunk_results'])
     
     return essay_id
