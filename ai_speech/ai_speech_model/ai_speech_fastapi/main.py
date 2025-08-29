@@ -1,6 +1,6 @@
 from datetime import timezone
 from google.cloud.firestore_v1.base_query import FieldFilter
-from schemas import UserCreate, PasswordResetRequest, ForgotPasswordRequest, UserOut, UserUpdate, Token, LoginRequest, ForgotPasswordRequest, GeminiRequest, ChatRequest, UploadRequest
+from schemas import UserCreate, PasswordResetRequest, ForgotPasswordRequest, UserOut, UserUpdate, Token, LoginRequest, ForgotPasswordRequest, GeminiRequest, ChatRequest
 from fastapi import Body
 from fastapi.websockets import WebSocketState
 import asyncio
@@ -21,11 +21,9 @@ from dotenv import load_dotenv
 from urllib.parse import parse_qs, unquote
 from concurrent.futures import ThreadPoolExecutor
 from fastapi.responses import FileResponse, JSONResponse
-import asyncio
 import time
 from pdf2image import convert_from_path
-from typing import List
-import os, shutil, uuid
+from typing import List, Optional, Any
 from PIL import Image
 import google.generativeai as genai
 from pinecone import Pinecone
@@ -36,7 +34,7 @@ import torch
 import logging
 from urllib.parse import parse_qs,unquote
 from jose import JWTError, jwt
-from ai_speech_module import Topic
+from ai_speech_module import Topic, AdvancedAudioProcessor
 from langchain_ollama import OllamaLLM
 import re
 from typing import List
@@ -51,35 +49,17 @@ from langchain.prompts import PromptTemplate
 from langchain.chains import RetrievalQA
 from langchain_community.vectorstores import Pinecone as PineconeVectorStore
 from PIL import Image, ImageDraw, ImageFont
-from PIL import Image, ImageDraw, ImageFont
-from pdf2image import convert_from_path
-from fastapi import UploadFile, File, Form, HTTPException
 import pandas as pd
 import docx2txt
 from pptx import Presentation
-import requests
-from bs4 import BeautifulSoup
 from firestore_models import FirestoreEssay
 from firebase import db
 from concurrent.futures import ProcessPoolExecutor
 process_pool = ProcessPoolExecutor()
-import requests
-from fastapi import WebSocket, WebSocketDisconnect
-from datetime import datetime
-import aiofiles
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
 import aiohttp
 import tempfile
-import asyncio
-import logging
-from datetime import datetime
 from urllib.parse import parse_qs
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks
-import shutil
-import time
-import logging
-import asyncio
-import uuid
 from typing import List, Dict
 from PIL import Image, ImageDraw, ImageFont
 from pdf2image import convert_from_path
@@ -88,23 +68,21 @@ from pptx import Presentation
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import subprocess
-import json
 from pdf2image import convert_from_path
-import os
 from fastapi import HTTPException
 from pathlib import Path
-import os
-from typing import List, Optional
 from PIL import Image
-import base64
-from io import BytesIO
 from typing import List, TypedDict, Annotated
-import os
 import glob
-import logging
-import json
-from datetime import datetime
 from langchain.chains import LLMChain
+import numpy as np
+from scipy import signal
+import librosa
+from urllib.parse import parse_qs
+from pydub.silence import detect_silence
+from fastapi.concurrency import run_in_threadpool
+from fastapi import BackgroundTasks
+from fastapi_mail import FastMail, MessageSchema, ConnectionConfig
 
 python311_path = "/home/ubuntu/ai_speech/venv/bin/python"
 script_path = "/home/ubuntu/ai_speech/ai_speech_model/ai_speech_fastapi/layoutparser_file.py"
@@ -145,6 +123,56 @@ origins = ["https://llm.edusmartai.com","http://localhost:3000","http://localhos
 
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
+
+_ASCII_LETTER_RE = re.compile(r"[A-Za-z]")
+
+_ARABIC_RANGES = [
+    (0x0600, 0x06FF),
+    (0x0750, 0x077F),
+    (0x08A0, 0x08FF),
+    (0xFB50, 0xFDFF),
+    (0xFE70, 0xFEFF),
+]
+
+def contains_arabic_char(ch: str) -> bool:
+    cp = ord(ch)
+    for start, end in _ARABIC_RANGES:
+        if start <= cp <= end:
+            return True
+    return False
+
+def is_ascii_letter(ch: str) -> bool:
+    return bool(_ASCII_LETTER_RE.match(ch))
+
+def keep_token_if_english(token: str, letter_ratio_threshold: float = 0.6) -> bool:
+    if token.strip() == "":
+        return False
+
+    if any(contains_arabic_char(ch) for ch in token):
+        return False
+
+    letters = [ch for ch in token if ch.isalpha()]
+    if not letters:
+        return False
+
+    ascii_letters = sum(1 for ch in letters if is_ascii_letter(ch))
+    ratio = ascii_letters / len(letters)
+    return ratio >= letter_ratio_threshold
+
+def filter_to_english(text: str, lower: bool = False) -> str:
+    if lower:
+        text = text.lower()
+
+    tokens = re.split(r"\s+", text.strip())
+
+    kept = []
+    for tok in tokens:
+        stripped = tok.strip("()[]{}\"'“”‘’.,;:?¡!—–")
+        if keep_token_if_english(stripped):
+            kept.append(stripped)
+
+    return " ".join(kept).strip()
+
 def get_user_from_redis_session(request: Request):
     token = request.headers.get("Authorization")
     if not token or not token.startswith("Bearer "):
@@ -169,9 +197,7 @@ def register(user: UserCreate):
     user_id = doc_ref[1].id
     return UserOut(id=user_id, username=user.username, email=user.email)
 
-from fastapi.concurrency import run_in_threadpool
-from fastapi import BackgroundTasks
-from fastapi_mail import FastMail, MessageSchema, ConnectionConfig
+
 
 PASSWORD_RESET_TOKEN_EXPIRE_HOURS = 1
 
@@ -188,7 +214,6 @@ mail_conf = ConnectionConfig(
 )
 
 
-
 async def validate_reset_token(token: str):
     try:
         token_data = redis_client.get(f"session:{token}")
@@ -197,7 +222,8 @@ async def validate_reset_token(token: str):
 
         if not token_data:
             raise HTTPException(status_code=400, detail="Invalid or expired token")
-            
+        
+        logging.info("token is validated -----------> done")
         return {"valid": True, "username": json.loads(token_data)["username"]}
         
     except HTTPException as he:
@@ -339,7 +365,7 @@ def login(data: LoginRequest):
 
     token = create_access_token({"sub": user_doc.id})
     logging.info(f"token in login file : {token}")
-    redis_client.setex(f"session:{token}", timedelta(hours=1), json.dumps({"user_id": user_doc.id, "username": data.username}))
+    redis_client.setex(f"session:{token}", timedelta(hours=24), json.dumps({"user_id": user_doc.id, "username": data.username}))
     return Token(access_token=token, username=data.username)
 
 
@@ -363,6 +389,7 @@ def me(user=Depends(get_user_from_redis_session)):
 
 @app.post("/generate-prompt")
 async def generate_prompt(data: GeminiRequest, user=Depends(get_user_from_redis_session)):
+    
     url = f"https://en.wikipedia.org/wiki/{data.topic}"
     api_endpoint = f"https://api.scrapingdog.com/scrape?api_key={scraping_api_key}&url={url}"
 
@@ -411,21 +438,252 @@ async def generate_prompt(data: GeminiRequest, user=Depends(get_user_from_redis_
     })
 
 
+
+
 @app.get("/overall-scoring-by-id")
 async def overall_scoring_by_listening_module(essay_id: str):
     topic = Topic()
-    result = await topic.overall_scoring_by_listening_module(essay_id)
-    return result
+    try:
+        result = await topic.overall_scoring_by_speech_module(essay_id)
+        if result or result is None:
 
-TEMP_DIR = os.path.abspath("audio_folder")
-os.makedirs(TEMP_DIR, exist_ok=True)
+            return {"status": "success", "data": result}
+        else:
+            raise HTTPException(status_code=404, detail=f"No scoring found for essay_id: {essay_id}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        last_exception = e
+
+    raise HTTPException(status_code=500, detail=f"Internal error while fetching scoring: {str(last_exception)}")
 
 
 @app.get("/overall-scoring-by-id-speech-module")
-async def overall_scoring_by_speech_module(essay_id: str):
+async def overall_scoring_by_listening_module(essay_id: str):
     topic = Topic()
-    result = await topic.overall_scoring_by_speech_module(essay_id)
-    return result
+    try:
+        result = await topic.overall_scoring_by_speech_module(essay_id)
+        if result or result is None:
+
+            return {"status": "success", "data": result}
+        else:
+            raise HTTPException(status_code=404, detail=f"No scoring found for essay_id: {essay_id}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        last_exception = e
+
+    raise HTTPException(status_code=500, detail=f"Internal error while fetching scoring: {str(last_exception)}")
+# @app.get("/overall-scoring-by-id-speech-module")
+# async def overall_scoring_by_speech_module(essay_id: str):
+#     topic = Topic()
+#     total_attempts = 30
+#     delay_seconds = 1
+
+#     for attempt in range(total_attempts):
+#         try:
+#             result = await topic.overall_scoring_by_speech_module(essay_id)
+#             if result is not None:
+#                 return result
+#         except Exception as e:
+#             print(f"Attempt {attempt+1} failed: {e}")
+#         await asyncio.sleep(delay_seconds)
+
+#     raise HTTPException(status_code=404, detail=f"No scoring found for essay_id: {essay_id}")
+
+
+# @app.get("/overall-scoring-by-id-speech-module")
+# async def overall_scoring_by_speech_module(essay_id: str):
+#     topic = Topic()
+#     result = await topic.overall_scoring_by_speech_module(essay_id)
+#     return result
+
+
+async def final_listening__overall_scoring(result, transcribed_text,original_text,websocket,total_grammar_score):
+    try:
+        fluency = result.get("fluency")
+        pronunciation = result.get("pronunciation")
+        emotion = result.get("emotion")
+        grammar_score = total_grammar_score
+
+        prompt_template = PromptTemplate(template = """
+            You are an expert English teacher providing comprehensive feedback on a student's listening comprehension exercise. Analyze the student's response in depth compared to the original essay.
+
+            ORIGINAL ESSAY (Content to be comprehended):
+            "{original_text}"
+
+            STUDENT'S COMPLETE RESPONSE (What they actually spoke):
+            "{transcribed_text}"
+
+            PERFORMANCE METRICS:
+            - Average Fluency: "{fluency}"
+            - Average Pronunciation: "{pronunciation}" 
+            - Dominant Emotion: "{emotion}"
+            - Grammar Score: "{grammar_score}"
+
+            CRITICAL ANALYSIS GUIDELINES:
+            1. CONTENT COVERAGE ANALYSIS: 
+            - Calculate approximate percentage of original content covered (word count, key ideas)
+            - Identify if student captured main themes vs specific details
+            - Note any content expansion or unnecessary additions
+
+            2. SEMANTIC UNDERSTANDING (not just keyword matching):
+            - Analyze if student understood concepts even with different vocabulary
+            - Identify paraphrasing quality and conceptual accuracy
+            - Detect misunderstandings or misinterpretations
+
+            3. RESPONSE QUALITY ASSESSMENT:
+            - Evaluate appropriateness of response length vs original content
+            - Assess coherence and logical flow of ideas
+            - Check if response addresses the core message
+
+            4. SCORING ADJUSTMENT CONSIDERATIONS:
+            - Adjust scores based on content coverage percentage
+            - Consider difficulty level of the original text
+            - Account for reasonable paraphrasing and synonym usage
+
+            STRICT DETAILED FEEDBACK STRUCTURE JSON format always:
+
+            {{
+                "content_analysis": {{
+                    "coverage_metrics": {{
+                        "original_word_count": [calculate approximate word count],
+                        "response_word_count": [calculate approximate word count],
+                        "coverage_percentage": "X%",
+                        "main_themes_captured": ["list main themes student understood"],
+                        "major_omissions": ["important concepts student missed"]
+                    }},
+                    "understanding_depth": {{
+                        "score": "X/10",
+                        "explanation": "Detailed analysis of how well student grasped concepts beyond literal words. Include examples of good paraphrasing or conceptual understanding.",
+                        "semantic_accuracy": "Assessment of whether meaning was preserved despite different wording",
+                        "conceptual_gaps": "Any fundamental misunderstandings detected"
+                    }},
+                    "detail_retention": {{
+                        "score": "X/10", 
+                        "explanation": "Analysis of specific details, facts, or examples retained from original",
+                        "key_details_captured": ["specific important details student mentioned"],
+                        "important_details_missed": ["crucial details student omitted"]
+                    }}
+                }},
+                
+                "linguistic_performance": {{
+                    "fluency_assessment": {{
+                        "score": {fluency},
+                        "detailed_analysis": "Specific examples of fluent segments and hesitations. Relate to content delivery.",
+                        "pace_appropriateness": "Did speaking rate support comprehension of content?"
+                    }},
+                    "pronunciation_assessment": {{
+                        "score": {pronunciation},
+                        "strengths": ["Words pronounced correctly with examples"],
+                        "improvement_areas": "Problematic words with phonetic corrections",
+                        "impact_on_clarity": "How pronunciation affected content understanding"
+                    }},
+                    "grammar_assessment": {{
+                        "score": {grammar_score},
+                        "accuracy_analysis": "Specific grammatical errors with corrections",
+                        "complexity_level": "Assessment of grammatical structures attempted",
+                        "error_patterns": "Recurring grammar issues affecting meaning"
+                    }},
+                    "vocabulary_usage": {{
+                        "appropriateness": "How well vocabulary matched the content level",
+                        "synonym_usage": "Quality of word substitutions when paraphrasing",
+                        "precision": "Use of specific vs generic terminology"
+                    }}
+                }},
+                
+                "technical_delivery": {{
+                    "clarity_coherence": "How well organized was the response for listener understanding",
+                    "emotion_appropriateness": "Did emotional tone match the content? {emotion}",
+                    "comprehensibility_score": "Overall how understandable was the response (1-10)"
+                }},
+                
+                "adaptive_scoring": {{
+                    "content_adjusted_scores": {{
+                        "understanding_score": "X/10 (adjusted for coverage and accuracy)",
+                        "retention_score": "X/10 (adjusted for detail capture)",
+                        "overall_comprehension": "X/10 (composite score)"
+                    }},
+                    "scoring_rationale": "Explanation of how coverage percentage affected final scores"
+                }},
+                
+                "improvement_strategy": {{
+                    "immediate_priority": "Most critical area needing improvement with specific examples",
+                    "content_handling_tips": [
+                        "How to better capture main ideas",
+                        "Techniques for detail retention", 
+                        "Paraphrasing strategies"
+                    ],
+                    "practice_recommendations": [
+                        "Specific exercises for content comprehension",
+                        "Listening retention drills",
+                        "Summarization practice"
+                    ]
+                }},
+                                         
+                "overall_scores": {{
+                    "fluency": "{fluency}",
+                    "pronunciation": "{pronunciation}",
+                    "grammar": "{grammar_score}",
+                    "emotion": f"{emotion}"
+                }},
+                
+                "strengths_highlight": [
+                    "What student did well despite content coverage limitations",
+                    "Effective paraphrasing examples",
+                    "Good conceptual understanding demonstrations"
+                ],
+                
+                "encouragement_message": "Motivational note acknowledging effort and suggesting growth path based on actual performance"
+            }}
+
+            SPECIFIC ANALYSIS REQUIREMENTS:
+            1. For short responses: Focus on quality of what was said rather than quantity missed
+            2. For keyword differences: Analyze if meaning was preserved with different terminology  
+            3. For partial coverage: Assess depth of understanding in covered portions
+            4. Always provide concrete examples from both original and student response
+            5. Be constructive - suggest how to improve rather than just criticizing
+            6. Highlight specific strengths to encourage student
+            7. All things need to tell with full explanation not in one-two sentence
+
+            Provide detailed, specific feedback that genuinely helps the student improve their listening comprehension skills.
+            """,
+            input_variables=["original_text", "transcribed_text", "fluency", "pronunciation", "emotion", "grammar_score","fluency","pronunciation","grammar_score","emotion"]
+            )
+        parser = StrOutputParser()
+        chain = prompt_template | model | parser
+        try:
+            feedback = await chain.ainvoke({
+                "original_text": original_text,
+                "transcribed_text": transcribed_text,
+                "fluency": fluency,
+                "pronunciation": pronunciation,
+                "emotion": emotion,
+                "grammar_score": grammar_score,
+            })
+
+            if feedback:
+                json_match = re.search(r'\{.*\}', feedback, re.DOTALL)
+                if json_match:
+                    try:
+                        feedback_json = json.loads(json_match.group())
+                        return feedback_json
+                    except json.JSONDecodeError as je:
+                        logging.error(f"JSON parsing failed: {je}\nRaw feedback: {feedback}")
+                        return feedback
+                else:
+                    logging.error(f"No JSON object found in feedback\nRaw feedback: {feedback}")
+                    return {"error": "No JSON object found in feedback", "raw_feedback": feedback}
+            else:
+                return {"error": "Empty feedback received"}
+
+        except Exception as e:
+            logging.error(f"Session finalization error: {e}")
+            return {"error": str(e)}
+
+    except Exception as e:
+        logging.info(f"Session finalization error: {e}")
+
 
 
 
@@ -443,12 +701,20 @@ async def audio_ws(websocket: WebSocket):
         await websocket.close(code=4001)
         logging.info("Username or token missing.")
         return
-        
 
     logging.info(f"[WS] Authenticated connection from {username}")
     chunk_index = 0
     chunk_results = []
     text_output = []
+
+    session_state = {
+        'audio_buffer': AudioSegment.empty(),
+        'silence_duration': 0.0,
+        'is_speaking': False
+    }
+
+    silence_threshold = 1
+    min_audio_length = 1.0
 
     date_str = datetime.now().strftime("%Y-%m-%d")
     user_dir = os.path.join(TEMP_DIR, username, date_str)
@@ -462,103 +728,180 @@ async def audio_ws(websocket: WebSocket):
     if os.path.exists(transcript_path):
         os.remove(transcript_path)
 
-    loop = asyncio.get_event_loop()
+    total_grammar_score = 0
+    grammar_score_count = 0
+    average_scores = {"fluency": 0, "pronunciation": 0, "emotion": "neutral"}
+
+    topic = Topic()
+    aiohttp_session = aiohttp.ClientSession()
 
     try:
-        topic = Topic()
         while True:
-            message = await websocket.receive()
-
-            if message["type"] == "websocket.disconnect":
-                print(f"[WS] {username} disconnected.")
+            try:
+                # ✅ Correct: explicitly receive raw audio bytes
+                audio_bytes = await websocket.receive_bytes()
+            except WebSocketDisconnect:
+                logging.info(f"[WS] {username} disconnected gracefully.")
+                break
+            except Exception as e:
+                logging.error(f"[WS] Error receiving audio: {e}")
                 break
 
-            if message["type"] == "websocket.receive" and "bytes" in message:
+            audio = AudioSegment(
+                data=audio_bytes,
+                sample_width=2,
+                frame_rate=16000,
+                channels=1
+            )
+            session_state['audio_buffer'] += audio
+
+            # detect silence
+            silence_ranges = detect_silence(audio, min_silence_len=100, silence_thresh=-40)
+            current_silence = sum((end - start) / 1000.0 for start, end in silence_ranges) if silence_ranges else 0.0
+
+            try:
+                temp_chunk_path = os.path.join(user_dir, f"temp_chunk_{chunk_index}.wav")
+                audio.export(temp_chunk_path, format="wav")
+
+                silvero = await topic.silvero_vad(temp_chunk_path)
+                current_silence = silvero.get("silence_duration", current_silence)
+                is_speaking = silvero.get("is_speaking", False)
+                os.remove(temp_chunk_path)
+            except Exception as e:
+                logging.warning(f"Silvero VAD failed: {e}, fallback mode")
+                is_speaking = current_silence < (len(audio) / 1000.0) * 0.7
+
+            if is_speaking:
+                session_state['silence_duration'] = 0.0
+                session_state['is_speaking'] = True
+            else:
+                session_state['silence_duration'] += current_silence
+                session_state['is_speaking'] = False
+
+            # flush when silence threshold crossed
+            if session_state['silence_duration'] >= silence_threshold and len(session_state['audio_buffer']) > min_audio_length * 1000:
                 chunk_filename = os.path.join(user_dir, f"chunk_{chunk_index}.wav")
-                audio = AudioSegment(
-                    data=message["bytes"],
-                    sample_width=2,
-                    frame_rate=16000,
-                    channels=1
-                )
-                audio.export(chunk_filename, format="wav")
+                session_state['audio_buffer'].export(chunk_filename, format="wav")
 
-                async with aiohttp.ClientSession() as session:
-                    with open(chunk_filename, "rb") as f:
-                        form = aiohttp.FormData()
-                        form.add_field("file", f, filename=os.path.basename(chunk_filename), content_type="audio/wav")
-                        async with session.post(f"{CPU_API_BASE}/detect-emotion", data=form) as res:
-                            emotion_data = await res.json()
-                            emotion = emotion_data.get("emotion")
-
+                try:
                     transcribed_text = await topic.speech_to_text(chunk_filename, username)
+                    output = filter_to_english(transcribed_text)
+                    if not output:
+                        continue
 
-                    async with session.post(
+                    await websocket.send_json({"type": "transcription", "data": output})
+                    logging.info(f"[WS] {username} transcribed: {output}")
+
+                    grammar_score = await topic.grammar_checking(transcribed_text)
+                    if grammar_score:
+                        total_grammar_score += float(grammar_score)
+                        grammar_score_count += 1
+
+                    # call scoring APIs
+                    fluency, pronunciation, emotion = 0, 0, "unknown"
+
+                    async with aiohttp_session.post(
                         f"{CPU_API_BASE}/fluency-score",
-                        json={"text": transcribed_text}
+                        json={"text": output}
                     ) as res:
                         fluency_data = await res.json()
-                        fluency = fluency_data.get("fluency")
+                        fluency = fluency_data.get("fluency", 0)
+
+                    # Pronunciation scoring
+                    with open(chunk_filename, "rb") as f:
+                        form = aiohttp.FormData()
+                        form.add_field("file", f, filename=os.path.basename(chunk_filename), 
+                                        content_type="audio/wav")
+                        async with aiohttp_session.post(f"{CPU_API_BASE}/pronunciation-score", data=form) as res:
+                            pron_data = await res.json()
+                            pronunciation = pron_data.get("pronunciation", 0)
+
+                    # async with aiohttp_session.post(
+                    #     f"{CPU_API_BASE}/pronunciation-score",
+                    #     data={"text": output}
+                    # ) as res:
+                    #     pron_data = await res.json()
+                    #     pronunciation = pron_data.get("pronunciation", 0)
 
                     with open(chunk_filename, "rb") as f:
                         form = aiohttp.FormData()
                         form.add_field("file", f, filename=os.path.basename(chunk_filename), content_type="audio/wav")
-                        async with session.post(f"{CPU_API_BASE}/pronunciation-score", data=form) as res:
-                            pron_data = await res.json()
-                            pronunciation = pron_data.get("pronunciation")
+                        async with aiohttp_session.post(f"{CPU_API_BASE}/detect-emotion", data=form) as res:
+                            emotion_data = await res.json()
+                            emotion = emotion_data.get("emotion", "unknown")
 
-                silvero = await topic.silvero_vad(chunk_filename)
-                topic.update_realtime_stats(fluency, pronunciation, emotion)
+                    topic.update_realtime_stats(fluency, pronunciation, emotion)
+                    text_output.append(output)
 
-                text_output.append(transcribed_text)
+                    chunk_result = {
+                        "chunk_index": chunk_index,
+                        "text": output,
+                        "emotion": emotion,
+                        "fluency": fluency,
+                        "pronunciation": pronunciation,
+                        "grammar_score": grammar_score,
+                        "silence_duration": session_state['silence_duration'],
+                        "file_path": chunk_filename
+                    }
+                    chunk_results.append(chunk_result)
 
-                chunk_result = {
-                    "chunk_index": chunk_index,
-                    "text": transcribed_text,
-                    "emotion": emotion,
-                    "fluency": fluency,
-                    "pronunciation": pronunciation,
-                    "silvero": silvero,
-                    "file_path": chunk_filename
-                }
+                    # reset buffer
+                    session_state['audio_buffer'] = AudioSegment.empty()
+                    session_state['silence_duration'] = 0.0
+                    session_state['is_speaking'] = False
+                    chunk_index += 1
 
-                logging.info(f"[Chunk {chunk_index}] {chunk_result}")
-                chunk_results.append(chunk_result)
-                chunk_index += 1
-
-    except WebSocketDisconnect:
-        logging.warning(f"[WS] {username} forcibly disconnected.")
+                except Exception as e:
+                    logging.error(f"Error processing chunk {chunk_index}: {e}")
 
     finally:
-        await loop.run_in_executor(None, merge_chunks, chunk_results, final_output)
+        await aiohttp_session.close()
 
-        with open(transcript_path, "w", encoding="utf-8") as f:
-            f.write(" ".join(text_output).strip())
+        # Only update DB if we got results
+        if chunk_results:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, merge_chunks, chunk_results, final_output)
 
-        try:
-            essays_ref = db.collection("essays").where("username", "==", username)
-            essays = essays_ref.stream()
-            today = datetime.now().date()
-            latest_essay = max((doc for doc in essays if doc.create_time.date() == today), key=lambda d: d.create_time, default=None)
+            with open(transcript_path, "w", encoding="utf-8") as f:
+                f.write(" ".join(text_output).strip())
 
-            if latest_essay:
-                essay_ref = db.collection("essays").document(latest_essay.id)
-                average_scores = topic.get_average_realtime_scores()
-                essay_ref.update({
-                    "chunks": chunk_results,
-                    "average_scores": average_scores
-                })
-                logging.info(f"Updated essay {latest_essay.id}")
+            try:
+                essays_ref = db.collection("essays").where("username", "==", username)
+                essays = essays_ref.stream()
+                today = datetime.now().date()
 
-        except Exception as e:
-            logging.error(f"[Firestore Update Error] {e}")
+                essay_list = []
+                for essay in essays:
+                    essay_data = essay.to_dict()
+                    create_time = essay_data.get("timestamp", essay.create_time)
+                    create_date = create_time.date() if hasattr(create_time, 'date') else create_time.to_python().date()
+                    if create_date == today:
+                        essay_list.append((essay.id, essay_data, create_time))
 
-        for file in os.listdir(user_dir):
-            if file.startswith("chunk_") and file.endswith(".wav"):
-                try:
-                    os.remove(os.path.join(user_dir, file))
-                except Exception as e:
-                    logging.warning(f"Failed to remove {file}: {e}")
+                if essay_list:
+                    latest_essay_id, latest_essay_data, latest_create_time = max(essay_list, key=lambda x: x[2])
+                    essay_ref = db.collection("essays").document(latest_essay_id)
+
+                    average_scores = topic.get_average_realtime_scores()
+                    if grammar_score_count > 0:
+                        total_grammar_score = round(total_grammar_score / grammar_score_count, 2)
+
+                    text_output_str = " ".join(text_output).strip()
+                    original_text = latest_essay_data.get("content", "")
+
+                    feedback_result = await final_listening__overall_scoring(
+                        average_scores, text_output_str, original_text, websocket, total_grammar_score
+                    )
+
+                    essay_ref.update({
+                        "chunks": chunk_results,
+                        "average_scores": average_scores,
+                        "overall_scoring": feedback_result
+                    })
+                    logging.info(f"Updated essay {latest_essay_id}")
+
+            except Exception as e:
+                logging.error(f"[Firestore Update Error] {e}")
 
 
 def merge_chunks(chunk_files, final_output):
@@ -568,13 +911,665 @@ def merge_chunks(chunk_files, final_output):
     for chunk in chunk_files:
         file_path = chunk.get("file_path")
         if file_path and os.path.exists(file_path):
-            audio = AudioSegment.from_file(file_path, format="wav")
-            combined += audio
+            try:
+                audio = AudioSegment.from_file(file_path, format="wav")
+                combined += audio
+            except Exception as e:
+                logging.warning(f"[Merge] Error reading {file_path}: {e}")
         else:
             logging.warning(f"[Merge] Skipping missing or invalid file: {file_path}")
 
-    combined.export(final_output, format="wav")
-    logging.info("[Merge] Merged audio file saved.")
+    if len(combined) > 0:
+        combined.export(final_output, format="wav")
+        logging.info("[Merge] Merged audio file saved.")
+    else:
+        logging.warning("[Merge] No audio to merge.")
+
+# @app.websocket("/ws/audio")
+# async def audio_ws(websocket: WebSocket):
+#     await websocket.accept()
+#     query_params = parse_qs(websocket.url.query)
+#     username = query_params.get("username", [None])[0]
+#     token = query_params.get("token", [None])[0]
+
+#     if not username or not token:
+#         await websocket.close(code=4001)
+#         logging.info("Username or token missing.")
+#         return
+
+#     logging.info(f"[WS] Authenticated connection from {username}")
+#     chunk_index = 0
+#     chunk_results = []
+#     text_output = []
+    
+#     session_state = {
+#         'audio_buffer': AudioSegment.empty(),
+#         'silence_duration': 0.0,
+#         'is_speaking': False
+#     }
+
+#     silence_threshold = 1
+#     min_audio_length = 1.0
+
+#     date_str = datetime.now().strftime("%Y-%m-%d")
+#     user_dir = os.path.join(TEMP_DIR, username, date_str)
+#     os.makedirs(user_dir, exist_ok=True)
+
+#     final_output = os.path.join(user_dir, f"{username}_output.wav")
+#     transcript_path = os.path.join(user_dir, f"{username}_transcript.txt")
+
+#     if os.path.exists(final_output):
+#         os.remove(final_output)
+#     if os.path.exists(transcript_path):
+#         os.remove(transcript_path)
+#     total_grammar_score = 0
+#     grammar_score_count = 0
+#     average_scores = {"fluency": 0, "pronunciation": 0, "emotion": "neutral"}
+
+#     try:
+#         topic = Topic()
+#         while True:
+#             message = await websocket.receive()
+
+#             if message["type"] == "websocket.disconnect":
+#                 print(f"[WS] {username} disconnected.")
+#                 break
+
+#             if message["type"] == "websocket.receive" and "bytes" in message:
+#                 audio = AudioSegment(
+#                     data=message["bytes"],
+#                     sample_width=2,
+#                     frame_rate=16000,
+#                     channels=1
+#                 )
+                
+#                 session_state['audio_buffer'] += audio
+                
+#                 silence_ranges = detect_silence(
+#                     audio, 
+#                     min_silence_len=100,
+#                     silence_thresh=-40
+#                 )
+                
+#                 current_silence = 0.0
+#                 if silence_ranges:
+#                     current_silence = sum((end - start) / 1000.0 for start, end in silence_ranges)
+                
+#                 try:
+#                     temp_chunk_path = os.path.join(user_dir, f"temp_chunk_{chunk_index}.wav")
+#                     audio.export(temp_chunk_path, format="wav")
+                    
+#                     silvero = await topic.silvero_vad(temp_chunk_path)
+#                     current_silence = silvero.get("silence_duration", current_silence)
+#                     is_speaking = silvero.get("is_speaking", False)
+                    
+#                     os.remove(temp_chunk_path)
+                    
+#                 except Exception as e:
+#                     logging.warning(f"Silvero VAD failed: {e}, using fallback silence detection")
+#                     is_speaking = current_silence < (len(audio) / 1000.0) * 0.7
+                
+#                 if is_speaking:
+#                     session_state['silence_duration'] = 0.0
+#                     session_state['is_speaking'] = True
+#                 else:
+#                     session_state['silence_duration'] += current_silence
+#                     session_state['is_speaking'] = False
+                
+#                 if (session_state['silence_duration'] >= silence_threshold and 
+#                     len(session_state['audio_buffer']) > min_audio_length * 1000):
+                    
+#                     chunk_filename = os.path.join(user_dir, f"chunk_{chunk_index}.wav")
+#                     session_state['audio_buffer'].export(chunk_filename, format="wav")
+                    
+#                     try:
+#                         async with aiohttp.ClientSession() as session:
+#                             transcribed_text = await topic.speech_to_text(chunk_filename, username)
+                            
+#                             output = filter_to_english(transcribed_text)
+#                             if not output:
+#                                 return
+#                             await websocket.send_json({"type": "transcription", "data": output})
+#                             logging.info(f"[WS] {username} transcribed text: {output}")
+#                             grammar_score = await topic.grammar_checking(transcribed_text)
+#                             if grammar_score:
+#                                 total_grammar_score += float(grammar_score)
+#                                 grammar_score_count += 1
+
+#                             with open(chunk_filename, "rb") as f:
+#                                 form = aiohttp.FormData()
+#                                 form.add_field("file", f, filename=os.path.basename(chunk_filename), 
+#                                              content_type="audio/wav")
+#                                 async with session.post(f"{CPU_API_BASE}/detect-emotion", data=form) as res:
+#                                     emotion_data = await res.json()
+#                                     emotion = emotion_data.get("emotion", "unknown")
+
+#                             async with session.post(
+#                                 f"{CPU_API_BASE}/fluency-score",
+#                                 json={"text": output}
+#                             ) as res:   
+#                                 fluency_data = await res.json()
+#                                 fluency = fluency_data.get("fluency", 0)
+
+#                             with open(chunk_filename, "rb") as f:
+#                                 form = aiohttp.FormData()
+#                                 form.add_field("file", f, filename=os.path.basename(chunk_filename), 
+#                                              content_type="audio/wav")
+#                                 async with session.post(f"{CPU_API_BASE}/pronunciation-score", data=form) as res:
+#                                     pron_data = await res.json()
+#                                     pronunciation = pron_data.get("pronunciation", 0)
+
+#                         topic.update_realtime_stats(fluency, pronunciation, emotion)
+#                         text_output.append(output)
+
+#                         chunk_result = {
+#                             "chunk_index": chunk_index,
+#                             "text": output,
+#                             "emotion": emotion,
+#                             "fluency": fluency,
+#                             "pronunciation": pronunciation,
+#                             "silence_duration": session_state['silence_duration'],
+#                             "file_path": chunk_filename
+#                         }
+
+#                         logging.info(f"[Chunk {chunk_index}] {chunk_result}")
+#                         chunk_results.append(chunk_result)
+                        
+#                         session_state['audio_buffer'] = AudioSegment.empty()
+#                         session_state['silence_duration'] = 0.0
+#                         session_state['is_speaking'] = False
+#                         chunk_index += 1
+                        
+#                     except Exception as e:
+#                         logging.error(f"Error processing chunk {chunk_index}: {e}")
+                
+#     except WebSocketDisconnect:
+#         logging.warning(f"[WS] {username} forcibly disconnected.")
+#     except Exception as e:
+#         logging.error(f"[WS] Unexpected error for {username}: {e}")
+
+#     finally:
+#         # Process any remaining audio in buffer
+#         if len(session_state['audio_buffer']) > min_audio_length * 1000:
+#             chunk_filename = os.path.join(user_dir, f"chunk_{chunk_index}.wav")
+#             session_state['audio_buffer'].export(chunk_filename, format="wav")
+            
+#             try:
+#                 async with aiohttp.ClientSession() as session:
+#                     transcribed_text = await topic.speech_to_text(chunk_filename, username)
+#                     output = filter_to_english(transcribed_text)
+                    
+#                     if output:
+#                         await websocket.send_json({"type": "transcription", "data": output})
+#                         text_output.append(output)
+                        
+#                         grammar_score = await topic.grammar_checking(transcribed_text)
+#                         if grammar_score:
+#                             total_grammar_score += float(grammar_score)
+#                             grammar_score_count += 1
+                            
+#                         chunk_result = {
+#                             "chunk_index": chunk_index,
+#                             "text": output,
+#                             "emotion": "unknown",
+#                             "fluency": 0,
+#                             "pronunciation": 0,
+#                             "grammar_score": grammar_score,
+#                             "silence_duration": 0,
+#                             "file_path": chunk_filename
+#                         }
+#                         chunk_results.append(chunk_result)
+#             except Exception as e:
+#                 logging.error(f"Error processing final chunk: {e}")
+        
+#         loop = asyncio.get_event_loop()
+#         await loop.run_in_executor(None, merge_chunks, chunk_results, final_output)
+
+#         with open(transcript_path, "w", encoding="utf-8") as f:
+#             f.write(" ".join(text_output).strip())
+
+#         try:
+#             essays_ref = db.collection("essays").where("username", "==", username)
+#             essays = essays_ref.stream()
+#             today = datetime.now().date()
+            
+#             essay_list = []
+#             for essay in essays:
+#                 essay_data = essay.to_dict()
+                
+#                 # Get the creation timestamp from the document
+#                 create_time = essay_data.get("timestamp")
+#                 if not create_time:
+#                     # If no timestamp field, use the document creation time
+#                     create_time = essay.create_time
+                
+#                 # Convert to date for comparison
+#                 if hasattr(create_time, 'date'):
+#                     create_date = create_time.date()
+#                 else:
+#                     # Handle Firestore Timestamp objects
+#                     create_date = create_time.to_python().date()
+                
+#                 if create_date == today:
+#                     essay_list.append((essay.id, essay_data, create_time))
+            
+#             if essay_list:
+#                 # Get the latest essay by creation time
+#                 latest_essay_id, latest_essay_data, latest_create_time = max(
+#                     essay_list, key=lambda x: x[2]
+#                 )
+                
+#                 # Get a reference to the latest essay document
+#                 essay_ref = db.collection("essays").document(latest_essay_id)
+
+#                 average_scores = topic.get_average_realtime_scores()
+#                 logging.info(f"Average Scores: {average_scores}")
+
+#                 text_output_str = " ".join(text_output).strip()
+
+#                 # Get the original text from the essay data
+#                 original_text = latest_essay_data.get("content", "")
+                
+#                 # Calculate average grammar score
+#                 if grammar_score_count > 0:
+#                     total_grammar_score = round(total_grammar_score / grammar_score_count, 2)
+#                 else:
+#                     total_grammar_score = 0
+
+#                 feedback_result = await final_listening__overall_scoring(
+#                     average_scores, 
+#                     text_output_str, 
+#                     original_text,
+#                     websocket,
+#                     total_grammar_score
+#                 )
+
+#                 if "```json" in feedback_result:
+#                     feedback_result = feedback_result.replace("```json", "")
+#                 if "```" in feedback_result:
+#                     feedback_result = feedback_result.replace("```", "")
+
+#                 logging.info(f"Final Feedback: {feedback_result}")
+                
+#                 essay_ref.update({
+#                     "chunks": chunk_results,
+#                     "average_scores": average_scores,
+#                     "overall_scoring": feedback_result
+#                 })
+#                 logging.info(f"Updated essay {latest_essay_id}")
+
+#         except Exception as e:
+#             logging.error(f"[Firestore Update Error] {e}")
+
+#         finally:
+#             # Clean up chunk files
+#             for file in os.listdir(user_dir):
+#                 if file.startswith("chunk_") and file.endswith(".wav"):
+#                     try:
+#                         os.remove(os.path.join(user_dir, file))
+#                     except Exception as e:
+#                         logging.warning(f"Failed to remove {file}: {e}")
+
+
+
+
+# def merge_chunks(chunk_files, final_output):
+#     logging.info("[Merge] Merging audio chunks...")
+#     combined = AudioSegment.empty()
+
+#     for chunk in chunk_files:
+#         file_path = chunk.get("file_path")
+#         if file_path and os.path.exists(file_path):
+#             try:
+#                 audio = AudioSegment.from_file(file_path, format="wav")
+#                 combined += audio
+#             except Exception as e:
+#                 logging.warning(f"[Merge] Error reading {file_path}: {e}")
+#         else:
+#             logging.warning(f"[Merge] Skipping missing or invalid file: {file_path}")
+
+#     combined.export(final_output, format="wav")
+#     logging.info("[Merge] Merged audio file saved.")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# @app.websocket("/ws/audio")
+# async def audio_ws(websocket: WebSocket):
+#     await websocket.accept()
+#     query_params = parse_qs(websocket.url.query)
+#     username = query_params.get("username", [None])[0]
+#     token = query_params.get("token", [None])[0]
+
+#     if not username or not token:
+#         await websocket.close(code=4001)
+#         logging.info("Username or token missing.")
+#         return
+
+#     logging.info(f"[WS] Authenticated connection from {username}")
+#     chunk_index = 0
+#     chunk_results = []
+#     text_output = []
+    
+#     session_state = {
+#         'audio_buffer': AudioSegment.empty(),
+#         'silence_duration': 0.0,
+#         'is_speaking': False
+#     }
+
+#     silence_threshold = 2
+#     min_audio_length = 1.0
+
+#     date_str = datetime.now().strftime("%Y-%m-%d")
+#     user_dir = os.path.join(TEMP_DIR, username, date_str)
+#     os.makedirs(user_dir, exist_ok=True)
+
+#     final_output = os.path.join(user_dir, f"{username}_output.wav")
+#     transcript_path = os.path.join(user_dir, f"{username}_transcript.txt")
+
+#     if os.path.exists(final_output):
+#         os.remove(final_output)
+#     if os.path.exists(transcript_path):
+#         os.remove(transcript_path)
+    
+#     # Initialize variables with default values
+#     total_grammar_score = 0
+#     grammar_score_count = 0
+#     average_scores = {"fluency": 0, "pronunciation": 0, "emotion": "neutral"}
+#     average_grammar_score = 0
+
+#     try:
+#         topic = Topic()
+#         while True:
+#             message = await websocket.receive()
+
+#             if message["type"] == "websocket.disconnect":
+#                 print(f"[WS] {username} disconnected.")
+#                 break
+
+#             if message["type"] == "websocket.receive" and "bytes" in message:
+#                 audio = AudioSegment(
+#                     data=message["bytes"],
+#                     sample_width=2,
+#                     frame_rate=16000,
+#                     channels=1
+#                 )
+                
+#                 session_state['audio_buffer'] += audio
+                
+#                 silence_ranges = detect_silence(
+#                     audio, 
+#                     min_silence_len=100,
+#                     silence_thresh=-40
+#                 )
+                
+#                 current_silence = 0.0
+#                 if silence_ranges:
+#                     current_silence = sum((end - start) / 1000.0 for start, end in silence_ranges)
+                
+#                 try:
+#                     temp_chunk_path = os.path.join(user_dir, f"temp_chunk_{chunk_index}.wav")
+#                     audio.export(temp_chunk_path, format="wav")
+                    
+#                     silvero = await topic.silvero_vad(temp_chunk_path)
+#                     current_silence = silvero.get("silence_duration", current_silence)
+#                     is_speaking = silvero.get("is_speaking", False)
+                    
+#                     os.remove(temp_chunk_path)
+                    
+#                 except Exception as e:
+#                     logging.warning(f"Silvero VAD failed: {e}, using fallback silence detection")
+#                     is_speaking = current_silence < (len(audio) / 1000.0) * 0.7
+                
+#                 if is_speaking:
+#                     session_state['silence_duration'] = 0.0
+#                     session_state['is_speaking'] = True
+#                 else:
+#                     session_state['silence_duration'] += current_silence
+#                     session_state['is_speaking'] = False
+                
+#                 if (session_state['silence_duration'] >= silence_threshold and 
+#                     len(session_state['audio_buffer']) > min_audio_length * 1000):
+                    
+#                     chunk_filename = os.path.join(user_dir, f"chunk_{chunk_index}.wav")
+#                     session_state['audio_buffer'].export(chunk_filename, format="wav")
+                    
+#                     try:
+#                         async with aiohttp.ClientSession() as session:
+#                             # Speech to text
+#                             transcribed_text = await topic.speech_to_text(chunk_filename, username)
+#                             output = filter_to_english(transcribed_text)
+                            
+#                             if not output:
+#                                 logging.warning(f"Empty transcription for chunk {chunk_index}")
+#                                 continue
+                                
+#                             # Send real-time transcription
+#                             await websocket.send_json({"type": "transcription", "data": output})
+#                             logging.info(f"[WS] {username} transcribed text: {output}")
+                            
+#                             # Grammar checking
+#                             grammar_score = await topic.grammar_checking(transcribed_text)
+#                             if grammar_score:
+#                                 total_grammar_score += float(grammar_score)
+#                                 grammar_score_count += 1
+
+#                             # Emotion detection
+#                             with open(chunk_filename, "rb") as f:
+#                                 form = aiohttp.FormData()
+#                                 form.add_field("file", f, filename=os.path.basename(chunk_filename), 
+#                                              content_type="audio/wav")
+#                                 async with session.post(f"{CPU_API_BASE}/detect-emotion", data=form) as res:
+#                                     emotion_data = await res.json()
+#                                     emotion = emotion_data.get("emotion", "unknown")
+
+#                             # Fluency scoring
+#                             async with session.post(
+#                                 f"{CPU_API_BASE}/fluency-score",
+#                                 json={"text": output}
+#                             ) as res:   
+#                                 fluency_data = await res.json()
+#                                 fluency = fluency_data.get("fluency", 0)
+
+#                             # Pronunciation scoring
+#                             with open(chunk_filename, "rb") as f:
+#                                 form = aiohttp.FormData()
+#                                 form.add_field("file", f, filename=os.path.basename(chunk_filename), 
+#                                              content_type="audio/wav")
+#                                 async with session.post(f"{CPU_API_BASE}/pronunciation-score", data=form) as res:
+#                                     pron_data = await res.json()
+#                                     pronunciation = pron_data.get("pronunciation", 0)
+
+#                         # Update real-time stats
+#                         topic.update_realtime_stats(fluency, pronunciation, emotion)
+#                         text_output.append(output)
+
+#                         chunk_result = {
+#                             "chunk_index": chunk_index,
+#                             "text": output,
+#                             "emotion": emotion,
+#                             "fluency": fluency,
+#                             "pronunciation": pronunciation,
+#                             "grammar_score": grammar_score,
+#                             "silence_duration": session_state['silence_duration'],
+#                             "file_path": chunk_filename
+#                         }
+
+#                         logging.info(f"[Chunk {chunk_index}] {chunk_result}")
+#                         chunk_results.append(chunk_result)
+                        
+#                         # Reset session state
+#                         session_state['audio_buffer'] = AudioSegment.empty()
+#                         session_state['silence_duration'] = 0.0
+#                         session_state['is_speaking'] = False
+#                         chunk_index += 1
+                        
+#                     except Exception as e:
+#                         logging.error(f"Error processing chunk {chunk_index}: {e}")
+#                         # Clean up failed chunk file
+#                         if os.path.exists(chunk_filename):
+#                             os.remove(chunk_filename)
+                
+#     except WebSocketDisconnect:
+#         logging.warning(f"[WS] {username} forcibly disconnected.")
+#     except Exception as e:
+#         logging.error(f"[WS] Unexpected error for {username}: {e}")
+#     finally:
+#         # Process any remaining audio in buffer
+#         if len(session_state['audio_buffer']) > min_audio_length * 1000:
+#             chunk_filename = os.path.join(user_dir, f"chunk_{chunk_index}.wav")
+#             session_state['audio_buffer'].export(chunk_filename, format="wav")
+            
+#             try:
+#                 async with aiohttp.ClientSession() as session:
+#                     transcribed_text = await topic.speech_to_text(chunk_filename, username)
+#                     output = filter_to_english(transcribed_text)
+                    
+#                     if output:
+#                         await websocket.send_json({"type": "transcription", "data": output})
+#                         text_output.append(output)
+                        
+#                         grammar_score = await topic.grammar_checking(transcribed_text)
+#                         if grammar_score:
+#                             total_grammar_score += float(grammar_score)
+#                             grammar_score_count += 1
+                            
+#                         chunk_result = {
+#                             "chunk_index": chunk_index,
+#                             "text": output,
+#                             "emotion": "unknown",
+#                             "fluency": 0,
+#                             "pronunciation": 0,
+#                             "grammar_score": grammar_score,
+#                             "silence_duration": 0,
+#                             "file_path": chunk_filename
+#                         }
+#                         chunk_results.append(chunk_result)
+#             except Exception as e:
+#                 logging.error(f"Error processing final chunk: {e}")
+        
+#         # Merge audio chunks and save transcript
+#         loop = asyncio.get_event_loop()
+#         await loop.run_in_executor(None, merge_chunks, chunk_results, final_output)
+
+#         with open(transcript_path, "w", encoding="utf-8") as f:
+#             f.write(" ".join(text_output).strip())
+
+#         try:
+#             # Get today's essays for this user
+#             essays_ref = db.collection("essays").where("username", "==", username)
+#             essays = essays_ref.stream()
+#             today = datetime.now().date()
+            
+#             essay_list = []
+#             for essay in essays:
+#                 # Get the document data
+#                 essay_data = essay.to_dict()
+                
+#                 # Get the creation timestamp from the document
+#                 create_time = essay_data.get("timestamp")
+#                 if not create_time:
+#                     # If no timestamp field, use the document creation time
+#                     create_time = essay.create_time
+                
+#                 # Convert to date for comparison
+#                 if hasattr(create_time, 'date'):
+#                     create_date = create_time.date()
+#                 else:
+#                     # Handle Firestore Timestamp objects
+#                     create_date = create_time.to_python().date()
+                
+#                 if create_date == today:
+#                     essay_list.append((essay.id, essay_data, create_time))
+            
+#             if essay_list:
+#                 # Get the latest essay by creation time
+#                 latest_essay_id, latest_essay_data, latest_create_time = max(
+#                     essay_list, key=lambda x: x[2]
+#                 )
+                
+#                 # Get a reference to the latest essay document
+#                 essay_ref = db.collection("essays").document(latest_essay_id)
+
+#                 average_scores = topic.get_average_realtime_scores()
+#                 logging.info(f"Average Scores: {average_scores}")
+
+#                 text_output_str = " ".join(text_output).strip()
+
+#                 # Get the original text from the essay data
+#                 original_text = latest_essay_data.get("content", "")
+                
+#                 # Calculate average grammar score
+#                 if grammar_score_count > 0:
+#                     total_grammar_score = round(total_grammar_score / grammar_score_count, 2)
+#                 else:
+#                     total_grammar_score = 0
+
+#                 feedback_result = await final_listening__overall_scoring(
+#                     average_scores, 
+#                     text_output_str, 
+#                     original_text,
+#                     websocket,
+#                     total_grammar_score
+#                 )
+
+#                 if "```json" in feedback_result:
+#                     feedback_result = feedback_result.replace("```json", "")
+#                 if "```" in feedback_result:
+#                     feedback_result = feedback_result.replace("```", "")
+
+#                 logging.info(f"Final Feedback: {feedback_result}")
+                
+#                 essay_ref.update({
+#                     "chunks": chunk_results,
+#                     "average_scores": average_scores,
+#                     "overall_scoring": feedback_result
+#                 })
+#                 logging.info(f"Updated essay {latest_essay_id}")
+
+#         except Exception as e:
+#             logging.error(f"[Firestore Update Error] {e}")
+
+#         finally:
+#             # Clean up chunk files
+#             for file in os.listdir(user_dir):
+#                 if file.startswith("chunk_") and file.endswith(".wav"):
+#                     try:
+#                         os.remove(os.path.join(user_dir, file))
+#                     except Exception as e:
+#                         logging.warning(f"Failed to remove {file}: {e}")
+
+
+# def merge_chunks(chunk_files, final_output):
+#     logging.info("[Merge] Merging audio chunks...")
+#     combined = AudioSegment.empty()
+
+#     for chunk in chunk_files:
+#         file_path = chunk.get("file_path")
+#         if file_path and os.path.exists(file_path):
+#             try:
+#                 audio = AudioSegment.from_file(file_path, format="wav")
+#                 combined += audio
+#             except Exception as e:
+#                 logging.warning(f"[Merge] Error reading {file_path}: {e}")
+#         else:
+#             logging.warning(f"[Merge] Skipping missing or invalid file: {file_path}")
+
+#     combined.export(final_output, format="wav")
+#     logging.info("[Merge] Merged audio file saved.")
+
 
 
 
@@ -593,7 +1588,6 @@ def get_tts_audio(username: str):
             return FileResponse(file_path, media_type="audio/wav", filename=f"{username}_output.wav")
         time.sleep(poll_interval)
         waited += poll_interval
-
     raise HTTPException(status_code=408, detail="Audio file not generated within 1 minute.")
 
 
@@ -1018,26 +2012,74 @@ def parse_llm_response(response_text: str):
             "question": "",
             "answer": response_text,
             "url": ""
-        }
+        }   
+
+HISTORY_DIR = "/chat_histroy_tmp"
+MAX_HISTORY = 10
+
+HISTORY_DIR = os.path.join(os.getcwd(), "chat_histroy_tmp")
+os.makedirs(HISTORY_DIR, exist_ok=True)
+
+def load_chat_history(file_path):
+    """Load existing chat history or return empty list."""
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            logging.warning(f"Corrupted history file: {file_path}, resetting.")
+            return []
+    return []
+
+def save_chat_history(file_path, history):
+    """Save chat history safely (atomic write)."""
+    tmp_path = f"{file_path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(history, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, file_path)
+
+def cleanup_old_history(username, student_class, subject, curriculum, today_date):
+    """Delete all history files for the user that are not from today."""
+    pattern = f"{username}_{student_class}_{subject}_{curriculum}_*.json"
+    old_files = glob.glob(os.path.join(HISTORY_DIR, pattern))
+    for file_path in old_files:
+        if today_date not in os.path.basename(file_path):
+            try:
+                os.remove(file_path)
+                logging.info(f"Deleted old history file: {file_path}")
+            except Exception as e:
+                logging.error(f"Failed to delete old history file {file_path}: {e}")
 
 @app.post("/chat/", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     try:
-        question = request.question.strip()
-        subject = request.subject.strip()
-        curriculum = request.curriculum.strip()
-        student_class = request.student_class.strip()
-        username = request.username.strip()
-        namespace = f"{curriculum}_{student_class}_{subject}"
         today_date = datetime.now().strftime("%Y-%m-%d")
-        base_dir = f"/home/ubuntu/ai_speech/ai_speech_model/ai_speech_fastapi/diagrams/{username}_{today_date}/extracted_images"
-        
+        chat_student_class = request.student_class.strip().replace(" ", "_")
+        cleanup_old_history(
+            request.username.strip(),
+            chat_student_class,
+            request.subject.strip(),
+            request.curriculum.strip(),
+            today_date
+        )
+
+        history_filename = (
+            f"{request.username.strip()}_"
+            f"{chat_student_class}_"
+            f"{request.subject.strip()}_"
+            f"{request.curriculum.strip()}_"
+            f"{today_date}.json"
+        )
+        history_file_path = os.path.join(HISTORY_DIR, history_filename)
+
+        chat_history = load_chat_history(history_file_path)
+
+        namespace = f"{request.curriculum.strip()}_{request.student_class.strip()}_{request.subject.strip()}"
+        base_dir = f"/home/ubuntu/ai_speech/ai_speech_model/ai_speech_fastapi/diagrams/{request.username.strip()}_{today_date}/extracted_images"
         image_extensions = ['*.png', '*.jpg', '*.jpeg', '*.gif', '*.bmp', '*.tiff']
         image_files = []
         for ext in image_extensions:
             image_files.extend(glob.glob(os.path.join(base_dir, ext)))
-        
-        logging.info(f"This is urls : {image_files}")
 
         vectorstore = PineconeVectorStore.from_existing_index(
             index_name=PINECONE_INDEX_NAME,
@@ -1045,84 +2087,113 @@ async def chat(request: ChatRequest):
             text_key="text",
             namespace=namespace
         )
-
         retriever = vectorstore.as_retriever(search_kwargs={
-            "k": 5,
+            "k": 8,
             "filter": {
-                "subject": subject,
-                "curriculum": curriculum,
-                "student_class": student_class,
+                "subject": request.subject.strip(),
+                "curriculum": request.curriculum.strip(),
+                "student_class": request.student_class.strip(),
             }
         })
 
-        retrieved_docs = retriever.invoke(question)
+        retrieved_docs = retriever.invoke(request.question.strip())
         retrieved_docs_content = " ".join(doc.page_content for doc in retrieved_docs)
+
+        history_context = "\n".join(
+            f"Q: {h['question']}\nA: {h['answer']}" for h in chat_history[-MAX_HISTORY:]
+        )
 
         prompt_template = PromptTemplate(
             template="""
-                You are an expert educator providing clear, concise answers to students.
-                Use ONLY the provided context to answer the question.
+            ROLE: You are an expert educator providing clear, concise answers to students.
 
-                Context:
-                {context}
+            INSTRUCTIONS:
+            1. Use ONLY the provided context and chat history to answer the question
+            2. Analyze the query type:
+            - If it's a normal conversational query, use history context and reply directly
+            - If it's a specific question, use the provided context to answer
+            3. Image selection criteria:
+            - Use exactly ONE relevant image ONLY if relevance exceeds 50%
+            - Image path must be EXACTLY one of the provided paths
+            - If no suitable image exists, use empty string for url
 
-                Available Images (use exactly one if relevant):
-                {image_files}
+            INPUT DATA:
+            Chat History: {history}
 
-                Rules:
-                - Respond in strict JSON format only
-                - Include exactly one diagram URL if relevant to the question
-                - The answer should not contain any URLs
-                - Image paths must be EXACTLY one of the provided paths
-                - If no image is relevant, use empty string for url
-                - Follow this exact format:
-                {{
-                    "question": "the asked question",
-                    "answer": "your answer without any URLs",
-                    "url": "single relevant image URL from above or empty string"
-                }}
+            Context: {context}
 
-                Question: {question}
+            Available Images: {image_files}
 
-                Response:
+            Question: {question}
+
+            OUTPUT REQUIREMENTS:
+            - Respond in STRICT JSON format ONLY
+            - The answer must NOT contain any URLs or external references
+            - Follow this EXACT structure:
+            {{
+                "question": "the original asked question",
+                "answer": "your comprehensive answer without any URLs",
+                "url": "exact matching image path or empty string"
+            }}
+
+            VALIDATION RULES:
+            1. Before responding, verify:
+            - Have I checked both history and context appropriately?
+            - Is the image selected truly relevant (>65% match)?
+            - Does my answer contain no URLs or external references?
+            - Is the output in exact JSON format required?
+
+            2. Error prevention:
+            - If question is unclear, ask for clarification in the answer field
+            - If no relevant context exists, state this clearly in the answer
+            - Never invent information beyond what's provided
+
+            RESPONSE:
             """,
-            input_variables=["question", "image_files", "context"]
+                input_variables=["history", "question", "image_files", "context"]
         )
-
-        qa_chain = LLMChain(
-            llm=model_name,
-            prompt=prompt_template
-        )
+        qa_chain = LLMChain(llm=model_name, prompt=prompt_template)
 
         result = qa_chain.invoke({
-            "question": question,
+            "history": history_context,
+            "question": request.question.strip(),
             "image_files": "\n".join(image_files) if image_files else "No images available",
             "context": retrieved_docs_content
         })
 
-
         parsed_response = parse_llm_response(result["text"])
         response_url = parsed_response.get("url", "")
 
-        if response_url == "empty string":
+        if response_url == "empty string" or response_url == "empty_string" or response_url == "":
+            response_url = ""
+
+        elif response_url.lstrip().startswith("/diagrams"):
             response_url = response_url
 
-        elif response_url == "empty_string":
-            response_url = response_url
-        
-        elif response_url.startswith("/diagrams"):
-            response_url = response_url
-        
-        elif response_url == "":
-            response_url = response_url
+        elif response_url.lstrip().startswith("/home"):
+            response_url = response_url.split("/diagrams")[1]
+            response_url = f"/diagrams{response_url}"
+            
         else:
-            response_url = f"/diagrams/{username}_{today_date}/extracted_images/{response_url}.png"
-            
-            
+            response_url = f"/diagrams/{request.username.strip()}_{today_date}/extracted_images/{response_url}.png"
+
+        if response_url.endswith(".png.png"):
+             response_url = response_url.removesuffix(".png.png") + ".png"
+
+        full_answer = parsed_response.get("answer","")
+        
+        full_answer = re.sub(r"(/home\S+\.(?:png|jpg|jpeg|gif|bmp|tiff))", "", full_answer, flags=re.IGNORECASE)
+        full_answer = re.sub(r"(/diagrams\S+\.(?:png|jpg|jpeg|gif|bmp|tiff))", "", full_answer, flags=re.IGNORECASE)
+        full_answer = re.sub(r"\s+", " ", full_answer).strip()
+
+        chat_history.append({"question": request.question.strip(), "answer": full_answer})
+        if len(chat_history) > MAX_HISTORY:
+            chat_history = chat_history[-MAX_HISTORY:]
+        save_chat_history(history_file_path, chat_history)
 
         return ChatResponse(
-            question=parsed_response.get("question", question),
-            answer=parsed_response.get("answer", ""),
+            question=parsed_response.get("question", request.question.strip()),
+            answer=full_answer,
             diagram_urls=response_url,
             source_documents=retrieved_docs_content
         )
@@ -1137,13 +2208,10 @@ async def chat(request: ChatRequest):
         )
 
 
-
-
 @app.get("/view-image/{full_path:path}")
 def view_image(full_path: str):
     image_path = (BASE_DIR / full_path.lstrip("/")).resolve()
 
-    # Security check
     if not str(image_path).startswith(str(BASE_DIR)):
         raise HTTPException(status_code=400, detail="Invalid file path")
 
@@ -1151,87 +2219,6 @@ def view_image(full_path: str):
         raise HTTPException(status_code=404, detail="Image not found")
 
     return FileResponse(image_path)
-
-
-
-
-# @app.post("/chat/")
-# async def chat(request: ChatRequest):
-#     try:
-#         question = request.question.strip()
-#         subject = request.subject.strip()
-#         curriculum = request.curriculum.strip()
-#         student_class = request.student_class.strip()
-#         username = request.username.strip()
-#         namespace = f"{curriculum}_{student_class}_{subject}"
-#         today_date = datetime.now().strftime("%Y-%m-%d")
-#         base_dir = f"diagrams/{username}_{today_date}/extracted_images"
-        
-
-#         vectorstore = PineconeVectorStore.from_existing_index(
-#             index_name=PINECONE_INDEX_NAME,
-#             embedding=embedding_model,
-#             text_key="text",
-#             namespace=namespace
-#         )
-
-#         retriever = vectorstore.as_retriever(search_kwargs={
-#             "k": 5,
-#             "filter": {
-#                 "subject": subject,
-#                 "curriculum": curriculum,
-#                 "student_class":student_class,
-#             }
-#         })
-
-#         retrieved_docs = retriever.invoke(question)
-
-#         for i, doc in enumerate(retrieved_docs, start=1):
-#             print(f"\nDocument {i}:\n{doc.page_content}")
-
-#         prompt_template = PromptTemplate.from_template("""
-#         You are an expert educator providing clear, concise answers to students.
-#         Extract the most relevant information to answer the question using ONLY the provided context.
-
-#         Follow these rules:
-#         1. Answer in complete, well-structured sentences.
-#         2. Do not mention page numbers or document structure.
-#         3. If context doesn't contain any content, say "This information is not in our materials."
-#         4. Be factual and avoid speculation.
-#         5. Use proper grammar and spelling.
-#         6. Keep your answer concise and to the point.
-#         7. Do not include '\\n' or '*' in your output.
-#         8. Do not include escape characters like \\n, \\, \", \n or any slashes.
-#         9. Do not use markdown symbols like '*', '-', '`', or backslashes.
-
-#         Context: {context}
-#         Question: {question}
-#         Answer:
-#         """)
-
-#         qa_chain = RetrievalQA.from_chain_type(
-#             llm=model_name,
-#             chain_type="stuff",
-#             retriever=retriever,
-#             chain_type_kwargs={"prompt": prompt_template},
-#             return_source_documents=True
-#         )
-
-#         result = qa_chain.invoke({"query": question})
-
-#         return {
-#             "question": question,
-#             "answer": result["result"],
-#             "source_documents": [doc.metadata for doc in result["source_documents"]]
-#         }
-
-#     except Exception as e:
-#         logging.error(f"Chat error: {str(e)}", exc_info=True)
-#         return {
-#             "question": request.question,
-#             "answer": "An error occurred while processing your request.",
-#             "error": str(e)
-#         }
 
 
 @app.get("/health")
@@ -1259,7 +2246,7 @@ async def system_message(topic, mood, student_class, level) -> SystemMessage:
     Mood: {mood}
     Student Class: {student_class}
     Level: {level}
-    5. Introduce on understanding the topic always.""",      
+    5. Introduce on understanding the topic always.""",
     input_variables=["topic", "mood", "student_class", "level"])
 
     chain = prompt_template | model | parser
@@ -1270,7 +2257,6 @@ async def system_message(topic, mood, student_class, level) -> SystemMessage:
         "level": level
     })
     return result
-
 
 async def initialize_essay_document(username, student_topic, student_class, mood, accent, chat_history):
     """Initialize a new essay document in Firestore"""
@@ -1309,6 +2295,661 @@ async def initialize_essay_document(username, student_topic, student_class, mood
         logging.error(f"Failed to initialize essay document: {str(e)}", exc_info=True)
         raise
 
+from collections import deque
+
+feedback_queue = deque()
+feedback_event = asyncio.Event()
+
+
+async def feedback_processor():
+    while True:
+        await feedback_event.wait()
+        while feedback_queue:
+            websocket, feedback = feedback_queue.popleft()
+            try:
+                await websocket.send_json({
+                    "type": "feedback",
+                    "data": feedback
+                })
+            except Exception as e:
+                logging.error(f"Failed to send feedback: {str(e)}")
+        feedback_event.clear()
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(feedback_processor())
+
+
+async def finalize_listening_session(result, transcribed_text, websocket):
+    try:
+        fluency = result.get("fluency")
+        pronunciation = result.get("pronunciation")
+        emotion = result.get("emotion")
+        grammar_score = result.get("grammar")
+
+        prompt_template = PromptTemplate(template = """
+            You are an expert English teacher providing comprehensive feedback on a student's listening comprehension and speaking response.
+
+            CONTEXT ANALYSIS:
+            The student has completed a listening exercise where they heard content and are now providing their spoken response.
+            Analyze both what they said AND how they said it.
+
+            STUDENT'S COMPLETE RESPONSE:
+            "{transcribed_text}"
+
+            PERFORMANCE METRICS:
+            - Average Fluency: {fluency}/10 (smoothness and flow of speech)
+            - Average Pronunciation: {pronunciation}/10 (clarity and accuracy of word pronunciation)
+            - Dominant Emotion: {emotion} (emotional tone during delivery)
+            - Grammar Score: {grammar_score}/10 (grammatical accuracy)
+
+            ANALYSIS GUIDELINES:
+            1. For content analysis: Consider what the response reveals about listening comprehension
+            2. For speaking performance: Focus on delivery quality regardless of content accuracy
+            3. Be specific: Provide exact examples from the student's response
+            4. Be constructive: Frame feedback positively with actionable suggestions
+            5. Consider context: The student heard content before speaking, so assess recall and understanding
+
+            DETAILED ANALYSIS REQUIRED:
+            Strict Provide comprehensive feedback in JSON format with these specific sections:
+
+            {{
+                "feedback": {{
+                    "content_understanding": {{
+                        "score": "X/10",
+                        "explanation": "How well did the student demonstrate understanding of the listened content? Analyze coherence, relevance, and depth of response.",
+                        "evidence": "Specific phrases or ideas that show comprehension level"
+                    }},
+                    "detail_retention": {{
+                        "score": "X/10", 
+                        "explanation": "How well did they retain and articulate specific details from what they heard?",
+                        "specifics_mentioned": ["Key details recalled accurately"],
+                        "approximations": ["Details recalled with minor inaccuracies"]
+                    }},
+                    "key_points_covered": ["Main themes or ideas the student successfully captured"],
+                    "potential_missed_opportunities": ["Areas where more depth or detail could have been added based on typical listening content"]
+                }},
+                "speaking_performance": {{
+                    "fluency_assessment": {{
+                        "score": {fluency},
+                        "analysis": "Detailed analysis of speech flow, hesitations, and natural rhythm with specific timestamp examples",
+                        "strengths": "Smooth segments and effective pacing examples",
+                        "improvement_areas": "Specific moments where fluency broke down"
+                    }},
+                    "pronunciation_assessment": {{
+                        "score": {pronunciation},
+                        "analysis": "Comprehensive pronunciation evaluation with word-specific feedback",
+                        "well_prnounced_words": ["List of correctly pronounced challenging words"],
+                        "needs_work_words": ["Problematic words with phonetic guidance: word→[correct pronunciation]"]
+                    }},
+                    "grammar_assessment": {{
+                        "score": {grammar_score},
+                        "analysis": "Detailed grammatical analysis with error categorization",
+                        "error_examples": ["Incorrect: 'she go' → Correct: 'she goes'"],
+                        "complexity_level": "Assessment of sentence structures attempted"
+                    }},
+                    "vocabulary_usage": {{
+                        "assessment": "Evaluation of word choice appropriateness and variety",
+                        "effective_vocabulary": ["Sophisticated or context-appropriate words used well"],
+                        "vocabulary_opportunities": ["Where more precise vocabulary could enhance meaning"]
+                    }},
+                    "speaking_clarity": {{
+                        "overall_rating": "Assessment of how understandable the response was",
+                        "clarity_factors": ["Pacing", "Articulation", "Volume consistency", "Phrasing"]
+                    }}
+                }},
+                "technical_metrics": {{
+                    "speaking_rate_analysis": "Assessment of words per minute and pace variation appropriateness",
+                    "pause_analysis": "Analysis of pause placement: effective pauses vs. hesitation pauses",
+                    "filler_word_usage": "Count and analysis of filler words (um, ah, like) with impact assessment",
+                    "prosody_evaluation": "Intonation patterns, stress placement, and rhythmic flow quality"
+                }},
+                "detailed_suggestions": [
+                    {{
+                        "suggestion": "Specific actionable suggestion 1",
+                        "example": "Concrete example from student's speech",
+                        "improved_version": "How to implement the suggestion"
+                    }},
+                    {{
+                        "suggestion": "Specific actionable suggestion 2", 
+                        "example": "Concrete example from student's speech",
+                        "improved_version": "How to implement the suggestion"
+                    }},
+                    {{
+                        "suggestion": "Specific actionable suggestion 3",
+                        "example": "Concrete example from student's speech",
+                        "improved_version": "How to implement the suggestion"
+                    }},
+                    {{
+                        "suggestion": "Specific actionable suggestion 4",
+                        "example": "Concrete example from student's speech",
+                        "improved_version": "How to implement the suggestion"
+                    }},
+                    {{
+                        "suggestion": "Specific actionable suggestion 5",
+                        "example": "Concrete example from student's speech",
+                        "improved_version": "How to implement the suggestion"
+                    }}
+                ],
+                "strengths": [
+                    {{
+                        "strength": "Specific strength 1",
+                        "evidence": "Exact phrase or moment demonstrating this strength without inside ' ' ",
+                        "impact": "Why this strength is effective"
+                    }},
+                    {{
+                        "strength": "Specific strength 2",
+                        "evidence": "Exact phrase or moment demonstrating this strength without inside ' ' ",
+                        "impact": "Why this strength is effective"
+                    }},
+                    {{
+                        "strength": "Specific strength 3",
+                        "evidence": "Exact phrase or moment demonstrating this strength without inside ' ' ",
+                        "impact": "Why this strength is effective"
+                    }}
+                ],
+                "practice_recommendations": [
+                    {{
+                        "activity": "Specific practice activity 1",
+                        "purpose": "What skill this develops",
+                        "frequency": "Recommended practice schedule"
+                    }},
+                    {{
+                        "activity": "Specific practice activity 2",
+                        "purpose": "What skill this develops",
+                        "frequency": "Recommended practice schedule"
+                    }},
+                    {{
+                        "activity": "Specific practice activity 3", 
+                        "purpose": "What skill this develops",
+                        "frequency": "Recommended practice schedule"
+                    }}
+                ],
+                "overall_scores": {{
+                    "fluency": {fluency},
+                    "pronunciation": {pronunciation},
+                    "grammar": {grammar_score},
+                    "emotion": "{emotion}",
+                    "comprehension_quality": "X/10 (based on content analysis)"
+                }},
+                "improvement_priority": {{
+                    "area": "The single most important area to focus on next",
+                    "reason": "Why this area is most critical for improvement",
+                    "immediate_action": "First step to address this priority"
+                }},
+                "encouragement": {{
+                    "progress_highlight": "Specific improvement or strength noticed",
+                    "motivational_message": "Personalized encouraging message",
+                    "growth_potential": "What they can achieve with continued practice"
+                }}
+            }}
+
+            CRITICAL: Ensure all feedback is specific, actionable, and includes concrete examples from the student's actual response.
+            """,
+            input_variables=["transcribed_text", "fluency", "pronunciation", "emotion", "grammar_score"]
+            )
+        parser = StrOutputParser()
+        chain = prompt_template | model | parser
+        feedback = await chain.ainvoke({
+            "transcribed_text": transcribed_text,
+            "fluency": fluency,
+            "pronunciation": pronunciation,
+            "emotion": emotion,
+            "grammar_score": grammar_score,
+            "fluency": fluency,
+            "pronunciation": pronunciation,
+            "emotion": emotion,
+            "grammar_score": grammar_score,
+        })
+
+        feedback_queue.append((websocket, feedback))
+        feedback_event.set()
+        
+        return feedback
+
+    except Exception as e:
+        logging.info(f"Session finalization error: {e}")
+
+
+import contextlib
+
+async def _safe_finalize_feedback(
+    config: dict,
+    temp_dir: str,
+    text: str,
+    websocket: WebSocket,
+    session_state: dict,
+    username: str,
+    buffer_filename: str,
+    topic: Topic,
+    http_session: aiohttp.ClientSession,
+    final_feedback_result: list
+):
+    try:
+        audio_buf = session_state.get('audio_buffer', AudioSegment.empty())
+        grammar_score = await topic.grammar_checking(text)
+        
+        final_output = os.path.join(temp_dir, f"{username}_output.wav")
+        if os.path.exists(final_output):
+            existing_audio = AudioSegment.from_wav(final_output)
+            combined_audio = existing_audio + audio_buf
+        else:
+            combined_audio = audio_buf
+        combined_audio.export(final_output, format="wav")
+
+        transcript_path = os.path.join(temp_dir, f"{username}_transcript.txt")
+        with open(transcript_path, "w", encoding="utf-8") as f:
+            f.write(" ".join(session_state.get('text_output', [])).strip())
+
+        clean_text = text.lower().strip()
+        result = {}
+        if (len(text.split()) >= config['min_utterance_length']):
+
+            with open(buffer_filename, "rb") as f:
+                form = aiohttp.FormData()
+                form.add_field("file", f, filename=os.path.basename(buffer_filename), content_type="audio/wav")
+                async with http_session.post(f"{CPU_API_BASE}/detect-emotion", data=form) as res:
+                    emotion_data = await res.json()
+                    result["emotion"] = (emotion_data or {}).get("emotion")
+
+            async with http_session.post(f"{CPU_API_BASE}/fluency-score", json={"text": text}) as res:
+                fluency_data = await res.json()
+                result["fluency"] = (fluency_data or {}).get("fluency")
+
+            with open(buffer_filename, "rb") as f:
+                form = aiohttp.FormData()
+                form.add_field("file", f, filename=os.path.basename(buffer_filename), content_type="audio/wav")
+                async with http_session.post(f"{CPU_API_BASE}/pronunciation-score", data=form) as res:
+                    pron_data = await res.json()
+                    result["pronunciation"] = (pron_data or {}).get("pronunciation")
+
+        result["grammar"] = grammar_score
+
+        config["fluency_score"] += float(result.get("fluency", 0))
+        config["pronunciation_score"] += float(result.get("pronunciation", 0))
+        config["emotion_score"] = result.get("emotion", 0)
+        config["grammar_score"] += float(result.get("grammar", 0))
+        config["count"] += 1
+
+        topic.update_realtime_stats(result.get("fluency"), result.get("pronunciation"), result.get("emotion"))
+
+        session_state.setdefault('chunk_results', []).append({
+            "chunk_index": session_state.get('chunk_index'),
+            "text": text,
+            "emotion": result.get("emotion"),
+            "fluency": result.get("fluency"),
+            "pronunciation": result.get("pronunciation"),
+            "grammar": grammar_score
+        })
+
+        if None in result.values():
+            logging.warning(f"Incomplete analysis results: {result}")
+
+        logging.info(f"result is --------------->{result}")
+
+        feedback_result = await finalize_listening_session(result, text, websocket)
+        final_feedback_result.append(feedback_result)
+        session_state["last_feedback"] = feedback_result
+        logging.info(f"this is feedback of chunk : {feedback_result}")
+
+    except Exception:
+        logging.exception("finalize_listening_session failed")
+
+
+async def overall_scoring_by_speech_module_test(
+    final_feedback_result: list, 
+    session_state: dict, 
+    topic: "Topic",
+    config: dict,
+    essay_id: str,
+    store_in_db: bool = True
+) -> Optional[Dict[str, Any]]:
+    logging.info("coming inside the overall scoring funtion -------------------------->>>>>>>>>>>>")
+    try:
+        count = config.get("count", 0)
+        if count == 0:
+            logging.warning("No audio chunks were processed, skipping overall scoring")
+            return None
+
+        fluency_score = config.get("fluency_score", 0) / count
+        pronunciation_score = config.get("pronunciation_score", 0) / count
+        grammar_score = config.get("grammar_score", 0) / count
+        emotion_score = config.get("emotion_score", "neutral")
+        
+        logging.info(f"Overall scores - Fluency: {fluency_score:.2f}, Pronunciation: {pronunciation_score:.2f}, Grammar: {grammar_score:.2f}, Emotion: {emotion_score}")
+
+        context_text = "No feedback data available"
+        if final_feedback_result:
+            try:
+                context_text = json.dumps(final_feedback_result, ensure_ascii=False, indent=2)
+            except Exception as e:
+                logging.warning(f"Failed to serialize feedback results: {e}")
+                context_text = str(final_feedback_result)
+
+        prompt_template = PromptTemplate(
+            template="""
+            You are a top English teacher providing comprehensive feedback on a student's speaking performance.
+
+            CONTEXT ANALYSIS:
+            You are analyzing aggregated feedback from multiple speech chunks from a listening comprehension exercise.
+            The student heard content and provided spoken responses that were chunked and analyzed separately.
+
+            AGGREGATED FEEDBACK DATA FROM ALL CHUNKS:
+            {final_feedback_result}
+
+            PERFORMANCE SUMMARY:
+            - Average Fluency: {fluency}/10 (across all speech segments)
+            - Average Pronunciation: {pronunciation}/10 (across all words spoken)
+            - Average Grammar: {grammar_score}/10 (overall grammatical accuracy)
+            - Dominant Emotion: {emotion} (prevailing emotional tone)
+
+            ANALYSIS GUIDELINES:
+            1. SYNTHESIZE PATTERNS: Identify consistent strengths and weaknesses across all chunks
+            2. CONTEXT AWARENESS: Remember this was a listening exercise - assess comprehension, not just speaking
+            3. SPECIFIC EXAMPLES: Reference actual content from the feedback chunks
+            4. PROPORTIONAL FEEDBACK: Weight feedback based on frequency of occurrences
+            5. ACTIONABLE INSIGHTS: Provide concrete, implementable suggestions
+
+            CRITICAL CONSIDERATIONS:
+            - If chunks show inconsistent performance, analyze why (fatigue, complexity, etc.)
+            - For listening comprehension: assess how well student captured main ideas vs details
+            - Consider speaking performance independent of content accuracy
+            - Account for natural speech patterns vs systematic errors
+
+            REQUIRED OUTPUT FORMAT (STRICT JSON):
+            {{
+                "feedback": {{
+                    "content_understanding": {{
+                        "score": "X/10",
+                        "explanation": "How well did the student understand the main ideas across all responses? Analyze consistency and depth.",
+                        "pattern_analysis": "Were there patterns in comprehension across chunks?",
+                        "evidence": "Specific examples from aggregated feedback showing comprehension level"
+                    }},
+                    "detail_retention": {{
+                        "score": "X/10", 
+                        "explanation": "How consistently did they retain specific details across different segments?",
+                        "key_points_covered": ["Main points student consistently mentioned across chunks"],
+                        "missed_points": ["Important points consistently missed across chunks"],
+                        "improvement_trend": "Did detail retention improve/worsen over time?",
+                    }},
+                    "comprehension_consistency": "Analysis of how understanding varied across different parts of the content",
+                }},
+                "speaking_performance": {{
+                    "fluency_assessment": {{
+                        "score": {fluency},
+                        "analysis": "Detailed fluency analysis across all chunks. Identify patterns: consistent issues or situational factors.",
+                        "consistency": "Was fluency stable or variable across the session?",
+                        "specific_examples": ["Timestamps or contexts where fluency excelled/failed"],
+                    }},
+                    "pronunciation_assessment": {{
+                        "score": {pronunciation},
+                        "analysis": "Pronunciation patterns across all speech. Identify systematic vs occasional errors.",
+                        "consistent_strengths": ["Words consistently pronounced correctly"],
+                        "systematic_errors": ["Words consistently mispronounced with corrections"],
+                        "situational_errors": ["Pronunciation issues in specific contexts"],
+                    }},
+                    "grammar_assessment": {{
+                        "score": {grammar_score},
+                        "analysis": "Grammar accuracy patterns. Distinguish between slips and systematic errors.",
+                        "error_patterns": ["Recurring grammatical mistakes across chunks"],
+                        "complexity_attempts": "Level of grammatical structures attempted consistently",
+                        "self_correction": "Evidence of self-monitoring and correction",
+                    }},
+                    "vocabulary_usage": {{
+                        "assessment": "Vocabulary range and appropriateness across entire session",
+                        "consistency": "Was vocabulary usage consistent or variable?",
+                        "appropriateness": "How well vocabulary matched the content level throughout"
+                    }},
+                    "speaking_clarity": {{
+                        "overall_rating": "Consistency of clarity across different speaking segments",
+                        "clarity_trend": "Did clarity improve or deteriorate over time?"
+                    }}
+                }},
+                "technical_metrics": {{
+                    "speaking_rate_consistency": "Analysis of pace variation across the session",
+                    "pause_patterns": "Were pauses strategic or hesitant? Pattern analysis",
+                    "filler_word_patterns": "Analysis of filler word usage frequency and contexts",
+                    "prosody_consistency": "How consistent were intonation and stress patterns?"
+                }},
+                "detailed_suggestions": [
+                    {{
+                        "suggestion": "Specific suggestion 1 addressing most frequent issue",
+                        "based_on": "Which feedback chunks support this suggestion",
+                        "implementation": "Concrete steps to implement",
+                        "expected_impact": "How this will improve performance"
+                    }},
+                    {{
+                        "suggestion": "Specific suggestion 2 addressing pattern from chunks", 
+                        "based_on": "Which feedback chunks support this suggestion",
+                        "implementation": "Concrete steps to implement",
+                        "expected_impact": "How this will improve performance"
+                    }},
+                    {{
+                        "suggestion": "Specific suggestion 3 for consistent strength development",
+                        "based_on": "Which feedback chunks support this suggestion",
+                        "implementation": "Concrete steps to implement",
+                        "expected_impact": "How this will improve performance"
+                    }},
+                    {{
+                        "suggestion": "Specific suggestion 4 for situational improvement",
+                        "based_on": "Which feedback chunks support this suggestion",
+                        "implementation": "Concrete steps to implement",
+                        "expected_impact": "How this will improve performance"
+                    }},
+                    {{
+                        "suggestion": "Specific suggestion 5 for overall development",
+                        "based_on": "Which feedback chunks support this suggestion",
+                        "implementation": "Concrete steps to implement",
+                        "expected_impact": "How this will improve performance"
+                    }}
+                ],
+                "strengths": [
+                    {{
+                        "strength": "Specific strength 1 observed consistently",
+                        "evidence": "Which chunks demonstrate this strength",
+                        "frequency": "How often this strength appeared",
+                        "impact": "How this strength supported communication"
+                    }},
+                    {{
+                        "strength": "Specific strength 2 with pattern evidence", 
+                        "evidence": "Which chunks demonstrate this strength",
+                        "frequency": "How often this strength appeared",
+                        "impact": "How this strength supported communication"
+                    }},
+                    {{
+                        "strength": "Specific strength 3 showing development",
+                        "evidence": "Which chunks demonstrate this strength",
+                        "frequency": "How often this strength appeared",
+                        "impact": "How this strength supported communication"
+                    }}
+                ],
+                "practice_recommendations": [
+                    {{
+                        "activity": "Specific practice activity 1 targeting most common issue",
+                        "priority": "High/Medium/Low priority based on frequency",
+                        "frequency": "Recommended practice schedule",
+                        "expected_outcome": "What improvement to expect"
+                    }},
+                    {{
+                        "activity": "Specific practice activity 2 for pattern improvement",
+                        "priority": "High/Medium/Low priority based on frequency",
+                        "frequency": "Recommended practice schedule",
+                        "expected_outcome": "What improvement to expect"
+                    }},
+                    {{
+                        "activity": "Specific practice activity 3 for strength reinforcement", 
+                        "priority": "High/Medium/Low priority based on frequency",
+                        "frequency": "Recommended practice schedule",
+                        "expected_outcome": "What improvement to expect"
+                    }}
+                ],
+                "overall_scores": {{
+                    "fluency": {fluency},
+                    "pronunciation": {pronunciation},
+                    "grammar": {grammar_score},
+                    "emotion": "{emotion}",
+                    "consistency_score": "X/10 (score for performance consistency across chunks)"
+                }},
+                "improvement_priority": {{
+                    "area": "The single most important area to focus on based on pattern analysis",
+                    "reason": "Why this area is critical (frequency, impact, etc.)",
+                    "urgency": "High/Medium/Low based on analysis",
+                    "first_steps": "Immediate actions to address this priority"
+                }},
+                "encouragement": {{
+                    "progress_highlight": "Most significant improvement or consistent strength",
+                    "pattern_achievement": "What the consistency patterns reveal about potential",
+                    "motivational_message": "Personalized encouragement based on aggregate performance"
+                }},
+                "analysis_metadata": {{
+                    "chunks_analyzed": "Number of feedback chunks processed",
+                    "consistency_pattern": "Summary of performance consistency",
+                    "key_insights": "Top 3 insights from pattern analysis"
+                }}
+            }}
+
+            CRITICAL: Base all analysis on actual patterns found in the aggregated feedback chunks.
+            Provide specific references to the chunk data where possible.
+            Ensure all scores and feedback are justified by the aggregated evidence.
+            """,
+            input_variables=["final_feedback_result", "fluency", "pronunciation", "grammar_score", "emotion"]
+        )
+
+        parser = StrOutputParser()
+        chain = prompt_template | model | parser
+
+        feedback = await chain.ainvoke({
+            "final_feedback_result": context_text,
+            "fluency": fluency_score,
+            "pronunciation": pronunciation_score,
+            "grammar_score": grammar_score,
+            "emotion": emotion_score
+        })
+
+        if "```json" in feedback:
+            feedback = feedback.replace("```json", "")
+        if "```" in feedback:
+            feedback = feedback.replace("```", "")
+        try:
+            feedback_data = json.loads(feedback)
+        except json.JSONDecodeError:
+            feedback_data = {
+                "raw_feedback": feedback,
+                "overall_scores": {
+                    "fluency": fluency_score,
+                    "pronunciation": pronunciation_score,
+                    "grammar": grammar_score,
+                    "emotion": emotion_score
+                }
+            }
+
+        logging.info(f"Overall scoring feedback generated successfully")
+
+        if store_in_db and essay_id:
+            await store_overall_scoring_in_db(essay_id, feedback_data)
+        
+        return feedback_data
+        
+    except ZeroDivisionError:
+        logging.warning("No audio chunks were processed (count=0), skipping overall scoring")
+        return None
+    except Exception as e:
+        logging.error(f"Error in overall scoring: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+async def store_overall_scoring_in_db(essay_id: str, scoring_data: Dict[str, Any]):
+
+    try:
+        essay_ref = db.collection("essays").document(essay_id)
+        
+        update_data = {
+            "overall_scoring": scoring_data,
+            "scoring_updated_at": datetime.now(),
+            "status": "scoring_completed"
+        }
+        
+        essay_ref.update(update_data)
+        logging.info(f"Overall scoring stored for essay {essay_id}")
+        logging.info("overall data stored in database ---------------------------->>>>>>>>>>>>>>")
+        
+    except Exception as e:
+        logging.error(f"Failed to store overall scoring in database: {str(e)}")
+        raise
+
+
+def finalize_session(
+    session_state, 
+    username, 
+    session_temp_dir, 
+    topic, 
+    essay_id, 
+    chat_history, 
+    final_feedback_result, 
+    config,
+):
+    """
+    Finalize session and trigger overall scoring in background
+    """
+    try:
+        serializable_chat_history = []
+        for message in chat_history:
+            if isinstance(message, (AIMessage, SystemMessage, HumanMessage)):
+                message_dict = {
+                    'type': 'chat_message',
+                    'content': message.content,
+                    'message_type': 'system' if isinstance(message, SystemMessage) else
+                                    'ai' if isinstance(message, AIMessage) else
+                                    'human'
+                }
+                serializable_chat_history.append(message_dict)
+            elif isinstance(message, dict):
+                serializable_chat_history.append(message)
+            else:
+                serializable_chat_history.append(str(message))
+
+        chunk_results_clean = []
+        for chunk in session_state.get('chunk_results', []):
+            clean_chunk = {
+                'chunk_index': chunk.get('chunk_index'),
+                'text': chunk.get('text'),
+                'emotion': chunk.get('emotion'),
+                'fluency': chunk.get('fluency'),
+                'pronunciation': chunk.get('pronunciation'),
+            }
+            chunk_results_clean.append(clean_chunk)
+
+        essay_ref = db.collection("essays").document(essay_id)
+        update_data = {
+            "chat_history": serializable_chat_history,
+            "chunks": chunk_results_clean,
+            "average_scores": topic.get_average_realtime_scores(),
+            "updated_at": datetime.now(),
+            "status": "completed",
+            "transcript": " ".join(session_state.get('text_output', [])).strip()
+        }
+        essay_ref.update(update_data)
+
+        asyncio.create_task(
+            overall_scoring_by_speech_module_test(
+                final_feedback_result=final_feedback_result,
+                session_state=session_state,
+                topic=topic,
+                config=config,
+                essay_id=essay_id,
+                store_in_db=True
+            )
+        )
+        
+        logging.info(f"Successfully updated essay document {essay_id} and triggered scoring")
+        return essay_id
+        
+    except Exception as e:
+        logging.error(f"Failed to finalize essay document: {str(e)}", exc_info=True)
+        raise
+
 
 TEMP_DIR = os.path.abspath("temp_chunks")
 os.makedirs(TEMP_DIR, exist_ok=True)
@@ -1316,6 +2957,7 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 @app.websocket("/ws/assistant")
 async def audio_ws_assistant(websocket: WebSocket):
     await websocket.accept()
+    http_session = aiohttp.ClientSession()
     query_params = parse_qs(websocket.url.query)
     username = query_params.get("username", [None])[0]
     token = query_params.get("token", [None])[0]
@@ -1324,6 +2966,10 @@ async def audio_ws_assistant(websocket: WebSocket):
     mood = query_params.get("mood", [None])[0]
     accent = query_params.get("accent", [None])[0]
 
+    await validate_reset_token(token)
+
+    final_feedback_result = []
+    
     chat_history = []
     essay_id = await initialize_essay_document(
         username=username,
@@ -1342,6 +2988,10 @@ async def audio_ws_assistant(websocket: WebSocket):
         logging.error(f"Failed to send initial essay_id: {str(e)}")
 
     ai_response = await system_message(student_topic, mood, student_class, accent)
+    await websocket.send_json({
+                    "type": "ai_response",
+                    "data": ai_response
+                })
     chat_history.append(SystemMessage(content=ai_response))
     
     if not username or not token:
@@ -1352,21 +3002,19 @@ async def audio_ws_assistant(websocket: WebSocket):
     logging.info(f"[WS] Authenticated connection from {username}")
     
     config = {
-        'silence_threshold': 3.06,
+        'silence_threshold': 2,
         'min_utterance_length': 3,
-        'min_speech_duration': 1.5,
-        'silence_dBFS_threshold': -45,
-        'processing_cooldown': 2.0,
-        'blocklist': [
-            'you', 'thank you', 'tchau', 'thanks', 'ok', 'Obrigado.', 'E aí', '',
-            'me', 'hello', 'hi', 'hey', 'okay', 'thanks', 'thank', 'obrigado',
-            'tchau.', 'bye', 'goodbye', 'me.', 'you.', 'thank you.',"I'm going to take a picture of the sea","Kansai International Airport",
-            "Thank you for watching!","1 tbsp of salt",'Teksting av Nicolai Winther',
-            'ん'
-        ],
+        'min_speech_duration': 1,
+        'silence_dBFS_threshold': -30,
+        'processing_cooldown': 1.5,
         'max_repetitions': 2,
-        'max_silence': 10.0,
-        'chunk_duration': 0.5
+        'max_silence': 1.0,
+        'chunk_duration': 0.5,
+        'fluency_score': 0,
+        'pronunciation_score': 0,
+        'emotion_score': None,
+        'grammar_score': 0,
+        'count':0
     }
 
     session_state = {
@@ -1387,19 +3035,23 @@ async def audio_ws_assistant(websocket: WebSocket):
         'active_speech_duration': 0.0
     }
     
+    
     topic = Topic()
     session_temp_dir = tempfile.mkdtemp(prefix=f"{username}_", dir=TEMP_DIR)
 
     session_state["assistant_speaking"] = True
     response_audio = await topic.text_to_speech_assistant(ai_response, username, session_temp_dir)
     sleep_time = await send_audio_response(websocket, response_audio)
-    await asyncio.sleep(sleep_time + 2)
+    await asyncio.sleep(sleep_time + 4)
     session_state["assistant_speaking"] = False
 
     logging.info(f"[Session] Temp dir created at {session_temp_dir}")
     
     final_output = os.path.join(session_temp_dir, f"{username}_output.wav")
     transcript_path = os.path.join(session_temp_dir, f"{username}_transcript.txt")
+    
+    audio_silence_handle = False
+    silence_count = 0
 
     try:
         while True:
@@ -1413,7 +3065,11 @@ async def audio_ws_assistant(websocket: WebSocket):
                 if (session_state['processing_active'] or 
                     session_state['assistant_speaking'] or
                     (time.time() - session_state['last_processing_time'] < config['processing_cooldown'])):
-                    continue    
+
+                    current_cooldown = time.time() - session_state['last_processing_time']
+                    if current_cooldown < config['processing_cooldown']:
+                        logging.debug(f"In cooldown period: {current_cooldown:.2f}s remaining")
+                    continue   
 
                 current_time = time.time()
                 new_chunk = AudioSegment(
@@ -1427,61 +3083,66 @@ async def audio_ws_assistant(websocket: WebSocket):
                 
                 loudness = new_chunk.dBFS
                 is_silent = loudness < config['silence_dBFS_threshold']
-                
-                if is_silent:
-                    session_state['consecutive_silence_chunks'] += 1
-                    logging.info(f"🟡 Silent chunk detected (loudness: {loudness:.2f} dB)")
-                    
-                    if (session_state['has_speech'] and 
-                        session_state['consecutive_silence_chunks'] * config['chunk_duration'] >= config['silence_threshold'] and
-                        session_state['active_speech_duration'] >= config['min_speech_duration']):
+
+                if session_state["silvero_model"] == True:
+                    if is_silent and audio_silence_handle == True:
+                        silence_count += 1
+                        session_state['consecutive_silence_chunks'] += 1
+                        logging.info(f"🟡 Silent chunk detected (loudness: {loudness:.2f} dB)")
                         
-                        await process_buffered_audio(
-                            final_output, transcript_path, session_state, 
-                            websocket, username, session_temp_dir, topic, 
-                            config, student_topic, student_class, mood, accent, chat_history
-                        )
-                else:
-                    if current_time - session_state['last_processing_time'] < config['processing_cooldown']:
-                        continue
-                        
-                    session_state['consecutive_silence_chunks'] = 0
-                    session_state['has_speech'] = True
-                    session_state['speech_buffer'] += new_chunk
-                    session_state['active_speech_duration'] += config['chunk_duration']
-                    session_state['last_speech_time'] = current_time
-                    logging.info(f"🔵 Speech chunk detected (loudness: {loudness:.2f} dB), active duration: {session_state['active_speech_duration']:.2f}s")
-                    
-                    chunk_filename = os.path.join(session_temp_dir, f"chunk_temp_{session_state['chunk_index']}.wav")
-                    new_chunk.export(chunk_filename, format="wav")
-                    session_state['chunk_index'] += 1
-                    
-                    vad_result = await topic.silvero_vad(chunk_filename)
-                    current_silence = vad_result.get("duration", 0.0)
-                    
-                    if current_silence > 0.3:
-                        logging.info(f"VAD detected silence gap: {current_silence:.2f}s")
-                        
-                        if (current_silence >= config['silence_threshold'] and 
-                            session_state['active_speech_duration'] >= config['min_speech_duration']):
+                        if (session_state['has_speech'] and 
+                            session_state['consecutive_silence_chunks'] * config['chunk_duration'] >= config['silence_threshold'] and
+                            session_state['active_speech_duration'] >= config['min_speech_duration']) or silence_count == 3:
                             
                             await process_buffered_audio(
-                                final_output, transcript_path, session_state, 
+                                session_state, 
                                 websocket, username, session_temp_dir, topic, 
-                                config, student_topic, student_class, mood, accent, chat_history
+                                config, student_topic, student_class, mood, accent, chat_history,http_session, final_feedback_result
                             )
-
+                    else:
+                        silence_count = 0
+                        if current_time - session_state['last_processing_time'] < config['processing_cooldown']:
+                            continue
+                        session_state['consecutive_silence_chunks'] = 0
+                        session_state['has_speech'] = True
+                        session_state['speech_buffer'] += new_chunk
+                        session_state['active_speech_duration'] += config['chunk_duration']
+                        session_state['last_speech_time'] = current_time
+                        logging.info(f"🔵 Speech chunk detected (loudness: {loudness:.2f} dB), active duration: {session_state['active_speech_duration']:.2f}s")
+                        audio_silence_handle = True
+                        
+                        chunk_filename = os.path.join(session_temp_dir, f"chunk_temp_{session_state['chunk_index']}.wav")
+                        new_chunk.export(chunk_filename, format="wav")
+                        session_state['chunk_index'] += 1
+                        
+                        vad_result = await topic.silvero_vad(chunk_filename)
+                        current_silence = vad_result.get("duration", 0.0)
+                        
+                        if current_silence > 0.3:
+                            logging.info(f"VAD detected silence gap: {current_silence:.2f}s")
+                            
+                            if (current_silence >= config['silence_threshold'] and 
+                                session_state['active_speech_duration'] >= config['min_speech_duration']):
+                                
+                                await process_buffered_audio(
+                                    session_state, 
+                                    websocket, username, session_temp_dir, topic, 
+                                    config, student_topic, student_class, mood, accent, chat_history, http_session, final_feedback_result
+                                )
     except WebSocketDisconnect:
         logging.warning(f"[WS] {username} disconnected unexpectedly")
     except Exception as e:
         logging.error(f"Unexpected error: {str(e)}", exc_info=True)
     finally:
-        essay_id = finalize_session(session_state, username, session_temp_dir, topic, essay_id, chat_history)
-
+        try:
+            essay_id = finalize_session(session_state, username, session_temp_dir, topic, essay_id, chat_history, final_feedback_result, config)
+        except Exception:
+            pass
+        with contextlib.suppress(Exception):
+            await http_session.close()
 
 
 def cleanup_temp_files(session_temp_dir, chunk_results):
-    """Clean up temporary files from session"""
     try:
         for chunk in chunk_results:
             try:
@@ -1501,91 +3162,69 @@ def cleanup_temp_files(session_temp_dir, chunk_results):
         logging.error(f"Error during temp file cleanup: {str(e)}")
 
 
-
-
-async def process_buffered_audio(final_output,transcript_path,session_state, websocket, username, temp_dir, topic, config,student_topic,student_class,mood,accent,chat_history):
+async def process_buffered_audio(session_state, websocket, username, temp_dir, topic, config, student_topic, student_class, mood, accent, chat_history, http_session, final_feedback_result):
     if len(session_state['audio_buffer']) == 0:
         return
+    
+    is_greeting = False
         
     session_state['processing_active'] = True
-    # session_state["silvero_model"] = False
+    session_state["silvero_model"] = False
+    
     try:
-
-
+        session_state['consecutive_silence_chunks'] = 0
+        session_state['has_speech'] = False
+        session_state['active_speech_duration'] = 0.0
+        session_state['last_speech_time'] = time.time()
+        
         buffer_filename = os.path.join(temp_dir, f"buffered_{time.time()}.wav")
         session_state['audio_buffer'].export(buffer_filename, format="wav")
         
         transcribed_text = await topic.speech_to_text(buffer_filename, username)
+        output = filter_to_english(transcribed_text)
+        if not output:
+            return
+        
+        await websocket.send_json({
+                    "type": "transcribed_text",
+                    "data": transcribed_text
+                })
         logging.info(f"Transcribed: {transcribed_text}")
         session_state['text_buffer'].append(transcribed_text)
         session_state['text_output'].append(transcribed_text)
-        
-        final_output = os.path.join(temp_dir, f"{username}_output.wav")
-        if os.path.exists(final_output):
-            existing_audio = AudioSegment.from_wav(final_output)
-            combined_audio = existing_audio + session_state['audio_buffer']
-        else:
-            combined_audio = session_state['audio_buffer']
-        combined_audio.export(final_output, format="wav")
-        
-        transcript_path = os.path.join(temp_dir, f"{username}_transcript.txt")
-        with open(transcript_path, "w", encoding="utf-8") as f:
-            f.write(" ".join(session_state['text_output']).strip())
-        
-        clean_text = transcribed_text.lower().strip()
-        if (len(transcribed_text.split()) >= config['min_utterance_length'] and 
-            clean_text not in config['blocklist']):
-            
-            async with aiohttp.ClientSession() as session:
 
-                with open(buffer_filename, "rb") as f:
-                        form = aiohttp.FormData()
-                        form.add_field("file", f, filename=os.path.basename(buffer_filename), content_type="audio/wav")
-                        async with session.post(f"{CPU_API_BASE}/detect-emotion", data=form) as res:
-                            emotion_data = await res.json()
-                            emotion = emotion_data.get("emotion")
+        test_list = list(transcribed_text.split())
 
-                async with session.post(
-                    f"{CPU_API_BASE}/fluency-score",
-                    json={"text": transcribed_text}
-                ) as res:
-                    fluency_data = await res.json()
-                    fluency = fluency_data.get("fluency")
 
-                with open(buffer_filename, "rb") as f:
-                    form = aiohttp.FormData()
-                    form.add_field("file", f, filename=os.path.basename(buffer_filename), content_type="audio/wav")
-                    async with session.post(f"{CPU_API_BASE}/pronunciation-score", data=form) as res:
-                        pron_data = await res.json()
-                        pronunciation = pron_data.get("pronunciation")
+        if len(test_list) > 10:
+            is_greeting = True
 
-                result = {
-                    "fluency": fluency,
-                    "pronunciation": pronunciation,
-                    "emotion": emotion
-                }
+        if is_greeting:
+            asyncio.create_task(
+                _safe_finalize_feedback(config, temp_dir, transcribed_text, websocket, session_state, username, buffer_filename, topic, http_session, final_feedback_result)
+            )
 
-                if None in result.values():
-                    logging.warning(f"Incomplete analysis results: {result}")
-
-                logging.info(f"result is --------------->{result}")
-
-                await process_user_utterance(
-                    transcribed_text, result["emotion"], result["fluency"], result["pronunciation"],
-                    session_state, buffer_filename, websocket, 
-                    username, temp_dir, topic,student_topic,student_class,mood,accent,chat_history
-                )
+        await process_user_utterance(
+            transcribed_text,
+            session_state, buffer_filename, websocket, 
+            username, temp_dir, topic, student_topic, student_class, mood, accent, chat_history
+        )
 
         session_state['audio_buffer'] = AudioSegment.empty()
+        session_state['speech_buffer'] = AudioSegment.empty()
         session_state['text_buffer'] = []
         session_state['conversation_active'] = True
+        
+        session_state['last_processing_time'] = time.time()
         
     except Exception as e:
         logging.error(f"Error processing buffered audio: {str(e)}", exc_info=True)
     finally:
         session_state['processing_active'] = False
-
-
+        await asyncio.sleep(0.5)
+        session_state["silvero_model"] = True
+        is_greeting = False
+        logging.info(f"VAD model re-enabled, session state: {session_state['silvero_model']}")
 
 
 
@@ -1612,25 +3251,14 @@ async def scraping(topic: str) -> str:
 
 
 
-async def process_user_utterance(text, emotion, fluency, pronunciation, 
-                               session_state, chunk_filename, websocket, 
+async def process_user_utterance(text, session_state, chunk_filename, websocket, 
                                username, session_temp_dir, topic,student_topic,student_class,mood,accent,chat_history):
-    topic.update_realtime_stats(fluency, pronunciation, emotion)
-
+    
     session_state['text_output'].append(text)
-    session_state['chunk_results'].append({
-        "chunk_index": session_state['chunk_index'],
-        "text": text,
-        "emotion": emotion,
-        "fluency": fluency,
-        "pronunciation": pronunciation,
-        "file_path": chunk_filename
-    })
     session_state['chunk_index'] += 1
     scraped_data = await scraping(topic)
 
     try:
-        
         prompt_template = PromptTemplate(template = """
             ROLE: You are a friendly, knowledgeable assistant and communicate like a friend. Your purpose is to:
             1. Answer questions conversationally
@@ -1653,7 +3281,6 @@ async def process_user_utterance(text, emotion, fluency, pronunciation,
             - Focus on providing helpful, concise answers.
             - If the question is not related to the topic, politely tell that quesiton is not related to the toic                     
                                                                 
-
             RULES:
             - NEVER mention:
             * Model architecture/type
@@ -1677,13 +3304,11 @@ async def process_user_utterance(text, emotion, fluency, pronunciation,
             Current response should be:
             """,input_variables=["scraped_data","question","student_topic","student_class","mood","accent","chat_history"]
             )
-        
+
         model = ChatOllama(
                 model="mistral",
                 model_kwargs={"temperature": 0.8}
             )
-
-        
 
         parser = StrOutputParser()
 
@@ -1699,14 +3324,15 @@ async def process_user_utterance(text, emotion, fluency, pronunciation,
             "chat_history": chat_history
         })
         chat_history.append(AIMessage(content=ai_response))
-        print("[AI Response]:", ai_response)
+        await websocket.send_json({
+                    "type": "ai_response",
+                    "data": ai_response
+                })
+        logging.info(f"[AI Response]: {ai_response}")
 
         chunk_result = {
                     "chunk_index": session_state['chunk_index'],
                     "text": text,
-                    "emotion": emotion,
-                    "fluency": fluency,
-                    "pronunciation": pronunciation,
                     "file_path": chunk_filename,
                     "chat_history":chat_history,
                 }
@@ -1715,15 +3341,11 @@ async def process_user_utterance(text, emotion, fluency, pronunciation,
 
         response_audio = await topic.text_to_speech_assistant(ai_response, username, session_temp_dir)
         sleep_time = await send_audio_response(websocket, response_audio)
-        time.sleep(sleep_time + 2)
-        session_state["silvero_model"]=True
-        print("session state now : ",session_state["silvero_model"])
+        await asyncio.sleep(sleep_time)
 
     except Exception as e:
         logging.error(f"QA Error: {str(e)}")
         await send_default_response(websocket, username, session_temp_dir, topic)
-
-
 
 
 async def send_audio_response(websocket, audio_file):
@@ -1749,10 +3371,6 @@ async def send_audio_response(websocket, audio_file):
         return 0
 
 
-
-
-
-
 async def send_default_response(websocket, username, session_temp_dir, topic):
     try:
         default_response = "I didn't quite catch that. Could you please repeat?"
@@ -1769,56 +3387,3 @@ async def send_followup(websocket, username, session_temp_dir, topic):
     except Exception as e:
         logging.error(f"Failed to send follow-up: {str(e)}")
 
-
-
-def finalize_session(session_state, username, session_temp_dir, topic, essay_id, chat_history):
-    try:
-        serializable_chat_history = []
-        for message in chat_history:
-            if isinstance(message, (AIMessage, SystemMessage, HumanMessage)):
-                message_dict = {
-                    'type': 'chat_message',
-                    'content': message.content,
-                    'message_type': 'system' if isinstance(message, SystemMessage) else 
-                                   'ai' if isinstance(message, AIMessage) else 
-                                   'human'
-                }
-                serializable_chat_history.append(message_dict)
-            elif isinstance(message, dict):
-                serializable_chat_history.append(message)
-            else:
-                serializable_chat_history.append(str(message))
-
-        chunk_results_clean = []
-        for chunk in session_state['chunk_results']:
-            clean_chunk = {
-                'chunk_index': chunk.get('chunk_index'),
-                'text': chunk.get('text'),
-                'emotion': chunk.get('emotion'),
-                'fluency': chunk.get('fluency'),
-                'pronunciation': chunk.get('pronunciation'),
-            }
-            chunk_results_clean.append(clean_chunk)
-
-        essay_ref = db.collection("essays").document(essay_id)
-        
-        update_data = {
-            "chat_history": serializable_chat_history,
-            "chunks": chunk_results_clean,
-            "average_scores": topic.get_average_realtime_scores(),
-            "updated_at": datetime.now(),
-            "status": "completed",
-            "transcript": " ".join(session_state['text_output']).strip()
-        }
-
-        essay_ref.update(update_data)
-        logging.info(f"Successfully updated essay document {essay_id}")
-        
-    except Exception as e:
-        logging.error(f"Failed to finalize essay document: {str(e)}", exc_info=True)
-        raise
-    
-    finally:
-        cleanup_temp_files(session_temp_dir, session_state['chunk_results'])
-    
-    return essay_id
